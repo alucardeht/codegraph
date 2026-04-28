@@ -1,5 +1,7 @@
 # codegraph
 
+[![Test](https://github.com/alucardeht/codegraph/actions/workflows/test.yml/badge.svg)](https://github.com/alucardeht/codegraph/actions/workflows/test.yml)
+
 Evidence-backed graph indexing for technical collections.
 
 `codegraph` builds a durable graph from source code, documentation, research
@@ -34,6 +36,9 @@ Each scan writes:
 - `.ready`: marker written only after the graph is fully generated.
 - `obsidian/`: optional human navigation export when `--export-obsidian` is
   passed.
+
+Optional project behavior can be configured with `codegraph.toml` in the target
+root or with `--config <path>`.
 
 ## Install For Local Development
 
@@ -72,6 +77,7 @@ Useful options:
 - `--no-default-ignores`: disable all built-in default ignores.
 - `--allow-output-inside-target`: explicitly permit generated output inside the
   analyzed target.
+- `--config <path>`: load an explicit `codegraph.toml`.
 
 ### Status
 
@@ -160,6 +166,68 @@ codegraph doctor /path/to/output --json
 Use `doctor` after generation, before opening a graph for serious work, or after
 a watch/refresh cycle.
 
+### Export
+
+Rebuild the human export from an existing ready graph.
+
+```bash
+codegraph export /path/to/output
+```
+
+### Open
+
+Print the Obsidian export path, or open it with the system default handler.
+
+```bash
+codegraph open /path/to/output
+codegraph open /path/to/output --system
+```
+
+### Clean
+
+Delete a managed graph output directory. This is intentionally explicit and
+refuses to delete without `--yes`.
+
+```bash
+codegraph clean /path/to/output --yes
+```
+
+`clean` only deletes directories that look like `codegraph` outputs.
+
+## Configuration
+
+`codegraph.toml` is optional. Scans remain useful without it.
+
+Example:
+
+```toml
+[scan]
+include = ["fixtures"]
+disable_default_ignore = ["node_modules"]
+
+[imports.aliases]
+"@/*" = "src/*"
+"@components/*" = "src/components/*"
+
+[architecture]
+feature_markers = ["domains", "packages"]
+generic_feature_names = ["internal"]
+```
+
+Supported sections:
+
+- `[scan] include`: paths that should override ignore policy.
+- `[scan] disable_default_ignore`: built-in ignore names to disable.
+- `[scan] no_default_ignores`: disable every built-in ignore.
+- `[imports.aliases]`: import path aliases. `*` wildcards are supported.
+- `[architecture] feature_markers`: path segments whose next segment should be
+  treated as a feature name.
+- `[architecture] generic_feature_names`: additional names that should not
+  become feature nodes.
+
+The manifest records the config path, effective config, and config fingerprint.
+Changing the config makes `status` report the graph as stale.
+
 ## Architecture Model
 
 The graph has two complementary layers.
@@ -196,6 +264,9 @@ When `--export-obsidian` is enabled, `codegraph` writes a navigable vault under
 Important sections:
 
 - `index.md`: freshness, quality, totals, and navigation.
+- `Dashboards/Architecture.md`: ranked architecture summary.
+- `Dashboards/Features.md`: ranked feature summary.
+- `Dashboards/Layers.md`: ranked layer summary.
 - `Indexes/Architecture.md`: high-level architecture nodes.
 - `Indexes/Features.md`: product/topic groupings.
 - `Indexes/Layers.md`: structural layers.
@@ -223,6 +294,8 @@ For an AI agent using an existing graph:
    search.
 7. Treat `INFERRED` edges as orientation and `PROVEN`/`DERIVED` edges as stronger
    planning evidence.
+
+For the full protocol, see [AGENT_PROTOCOL.md](AGENT_PROTOCOL.md).
 
 This workflow is meant to reduce broad grep passes, not ban source inspection.
 The graph should answer "where should I look first?" and "what is connected to
@@ -271,6 +344,12 @@ Run tests:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
+
+The test suite includes benchmark fixtures for:
+
+- alias-heavy TypeScript application structure
+- non-code research notes
+- configuration, logs, assets, and generated artifacts
 
 Generate a disposable fixture graph:
 

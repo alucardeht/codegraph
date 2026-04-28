@@ -46,6 +46,7 @@ def graph_status(output: Path) -> dict[str, Any]:
     files = discover_files(target, policy, skipped)
     current = stat_files(target, files)
     previous = manifest.get("source_fingerprints", {})
+    config_changed = changed_config(manifest)
 
     added = sorted(set(current) - set(previous))
     deleted = sorted(set(previous) - set(current))
@@ -56,7 +57,7 @@ def graph_status(output: Path) -> dict[str, Any]:
         or current[path].get("size") != previous[path].get("size")
     )
 
-    freshness = "current" if not added and not deleted and not changed else "stale"
+    freshness = "current" if not added and not deleted and not changed and not config_changed else "stale"
     return {
         "freshness": freshness,
         "target": str(target),
@@ -64,6 +65,7 @@ def graph_status(output: Path) -> dict[str, Any]:
         "added": added,
         "deleted": deleted,
         "changed": changed,
+        "config_changed": config_changed,
         "indexed_file_count": len(previous),
         "current_file_count": len(current),
     }
@@ -86,3 +88,17 @@ def stat_files(target: Path, files: list[Path]) -> dict[str, dict[str, Any]]:
             "mtime_ns": stat.st_mtime_ns,
         }
     return metadata
+
+
+def changed_config(manifest: dict[str, Any]) -> bool:
+    previous = manifest.get("config_fingerprint")
+    config_path = manifest.get("scan_options", {}).get("config")
+    if not previous and not config_path:
+        return False
+    if not config_path:
+        return False
+    path = Path(config_path)
+    if not path.is_file():
+        return True
+    stat = path.stat()
+    return previous != {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import re
 from pathlib import Path
 
+from .config import ImportAlias
 from .graph import Graph
 from .models import SourceRange
 
@@ -90,10 +92,16 @@ class ExtractionResult:
         }
 
 
-def extract_file_content(graph: Graph, target: Path, file_path: Path) -> ExtractionResult:
+def extract_file_content(
+    graph: Graph,
+    target: Path,
+    file_path: Path,
+    *,
+    import_aliases: tuple[ImportAlias, ...] = (),
+) -> ExtractionResult:
     relative = file_path.relative_to(target).as_posix()
     suffix = file_path.suffix.lower()
-    content_domain = classify_content_domain(file_path)
+    content_domain = classify_content_domain(Path(relative))
     if not is_supported_file(file_path):
         return ExtractionResult(relative, "none", supported=False, content_domain=content_domain)
 
@@ -112,8 +120,10 @@ def extract_file_content(graph: Graph, target: Path, file_path: Path) -> Extract
             extract_asset(graph, file_path, relative)
         elif content_domain == "generated":
             extract_generated_artifact(graph, file_path, relative)
+        elif suffix == ".py":
+            extract_python_ast(graph, target, file_path, relative, import_aliases=import_aliases)
         else:
-            extract_code_lexical(graph, target, file_path, relative)
+            extract_code_lexical(graph, target, file_path, relative, import_aliases=import_aliases)
     except OSError as error:
         return ExtractionResult(
             relative,
@@ -423,7 +433,135 @@ def extract_generated_artifact(graph: Graph, file_path: Path, relative: str) -> 
     )
 
 
-def extract_code_lexical(graph: Graph, target: Path, file_path: Path, relative: str) -> None:
+def extract_python_ast(
+    graph: Graph,
+    target: Path,
+    file_path: Path,
+    relative: str,
+    *,
+    import_aliases: tuple[ImportAlias, ...] = (),
+) -> None:
+    source = file_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(source, filename=relative)
+    except SyntaxError:
+        extract_code_lexical(graph, target, file_path, relative, import_aliases=import_aliases)
+        return
+
+    file_node = f"file:{relative}"
+    lines = source.splitlines()
+    local_symbols: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                add_import_relationship(
+                    graph,
+                    target,
+                    file_path,
+                    file_node,
+                    relative,
+                    node.lineno,
+                    line_at(lines, node.lineno),
+                    alias.name,
+                    [alias.asname or alias.name.split(".", 1)[0]],
+                    {},
+                    import_aliases,
+                    extractor="python.ast",
+                    method="ast-import",
+                    confidence="PROVEN",
+                )
+        elif isinstance(node, ast.ImportFrom):
+            module = "." * node.level + (node.module or "")
+            names = [alias.asname or alias.name for alias in node.names if alias.name != "*"]
+            add_import_relationship(
+                graph,
+                target,
+                file_path,
+                file_node,
+                relative,
+                node.lineno,
+                line_at(lines, node.lineno),
+                module,
+                names,
+                {},
+                import_aliases,
+                extractor="python.ast",
+                method="ast-import-from",
+                confidence="PROVEN",
+            )
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            kind = "class" if isinstance(node, ast.ClassDef) else "function"
+            symbol_id = f"symbol:{relative}#{node.name}:{node.lineno}"
+            local_symbols[node.name] = symbol_id
+            graph.add_node(
+                symbol_id,
+                kind,
+                node.name,
+                source_path=relative,
+                range=SourceRange(node.lineno),
+            )
+            evidence_id = graph.add_evidence(
+                extractor="python.ast",
+                method=f"{kind}-definition",
+                source_locator=f"{relative}:{node.lineno}",
+                snippet=line_at(lines, node.lineno),
+                confidence="PROVEN",
+            )
+            graph.add_edge(
+                kind="contains",
+                source=file_node,
+                target=symbol_id,
+                confidence="PROVEN",
+                evidence_id=evidence_id,
+            )
+            graph.add_edge(
+                kind="defines",
+                source=file_node,
+                target=symbol_id,
+                confidence="PROVEN",
+                evidence_id=evidence_id,
+            )
+
+    for owner in ast.walk(tree):
+        if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        owner_id = local_symbols.get(owner.name)
+        if not owner_id:
+            continue
+        for node in ast.walk(owner):
+            if not isinstance(node, ast.Call):
+                continue
+            called_name = python_call_name(node.func)
+            target_id = local_symbols.get(called_name or "")
+            if not called_name or not target_id or target_id == owner_id:
+                continue
+            evidence_id = graph.add_evidence(
+                extractor="python.ast",
+                method="call",
+                source_locator=f"{relative}:{node.lineno}",
+                snippet=line_at(lines, node.lineno),
+                confidence="PROVEN",
+            )
+            graph.add_edge(
+                kind="calls",
+                source=owner_id,
+                target=target_id,
+                confidence="PROVEN",
+                evidence_id=evidence_id,
+                attributes={"function": called_name},
+            )
+
+
+def extract_code_lexical(
+    graph: Graph,
+    target: Path,
+    file_path: Path,
+    relative: str,
+    *,
+    import_aliases: tuple[ImportAlias, ...] = (),
+) -> None:
     file_node = f"file:{relative}"
     lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
     imported_bindings: dict[str, str] = {}
@@ -440,6 +578,7 @@ def extract_code_lexical(graph: Graph, target: Path, file_path: Path, relative: 
             module,
             names,
             imported_bindings,
+            import_aliases,
         )
         if target_id:
             continue
@@ -457,6 +596,7 @@ def extract_code_lexical(graph: Graph, target: Path, file_path: Path, relative: 
                 module,
                 imported_names_from_line(line, module, file_path.suffix.lower()),
                 imported_bindings,
+                import_aliases,
             )
 
         definition = definition_from_line(line, file_path.suffix.lower())
@@ -530,32 +670,37 @@ def add_import_relationship(
     module: str,
     names: list[str],
     imported_bindings: dict[str, str],
+    import_aliases: tuple[ImportAlias, ...],
+    *,
+    extractor: str = "code.lexical",
+    method: str | None = None,
+    confidence: str | None = None,
 ) -> str:
-    resolved = resolve_relative_import(target, file_path, module)
+    resolved = resolve_import(target, file_path, module, import_aliases)
     if resolved:
         target_relative = resolved.relative_to(target).as_posix()
         target_id = f"file:{target_relative}"
-        confidence = "DERIVED"
-        method = "lexical-import+relative-resolution"
+        edge_confidence = confidence or "DERIVED"
+        edge_method = method or "lexical-import+relative-resolution"
         for binding in names:
             imported_bindings[binding] = target_id
     else:
         target_id = f"module:{module}"
         graph.add_node(target_id, "module", module)
-        confidence = "PROVEN"
-        method = "lexical-import"
+        edge_confidence = confidence or "PROVEN"
+        edge_method = method or "lexical-import"
     evidence_id = graph.add_evidence(
-        extractor="code.lexical",
-        method=method,
+        extractor=extractor,
+        method=edge_method,
         source_locator=f"{relative}:{line_number}",
         snippet=snippet,
-        confidence=confidence,
+        confidence=edge_confidence,
     )
     graph.add_edge(
         kind="imports",
         source=file_node,
         target=target_id,
-        confidence=confidence,
+        confidence=edge_confidence,
         evidence_id=evidence_id,
         attributes={"module": module},
     )
@@ -572,7 +717,7 @@ def add_import_relationship(
                 kind="exports",
                 source=target_id,
                 target=binding_id,
-                confidence=confidence,
+                confidence=edge_confidence,
                 evidence_id=evidence_id,
                 attributes={"module": module, "symbol": binding},
             )
@@ -580,12 +725,26 @@ def add_import_relationship(
                 kind="imports",
                 source=file_node,
                 target=binding_id,
-                confidence=confidence,
+                confidence=edge_confidence,
                 evidence_id=evidence_id,
                 attributes={"module": module, "symbol": binding},
             )
             imported_bindings[binding] = binding_id
     return target_id
+
+
+def line_at(lines: list[str], line_number: int) -> str:
+    if 1 <= line_number <= len(lines):
+        return lines[line_number - 1]
+    return ""
+
+
+def python_call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
 
 def modules_from_line(line: str, suffix: str) -> list[str]:
@@ -688,10 +847,44 @@ def imported_binding_node_id(module: str, binding: str) -> str:
     return f"imported-symbol:{module}#{binding}"
 
 
+def resolve_import(
+    target: Path,
+    file_path: Path,
+    module: str,
+    aliases: tuple[ImportAlias, ...],
+) -> Path | None:
+    if module.startswith("./") or module.startswith("../"):
+        return resolve_candidate_base(target, file_path.parent / module)
+    if module.startswith("."):
+        return resolve_python_relative_import(target, file_path, module)
+    for base in alias_candidate_bases(target, module, aliases):
+        resolved = resolve_candidate_base(target, base)
+        if resolved:
+            return resolved
+    return None
+
+
 def resolve_relative_import(target: Path, file_path: Path, module: str) -> Path | None:
     if not module.startswith("."):
         return None
-    base = (file_path.parent / module).resolve()
+    if module.startswith("./") or module.startswith("../"):
+        return resolve_candidate_base(target, file_path.parent / module)
+    return resolve_python_relative_import(target, file_path, module)
+
+
+def resolve_python_relative_import(target: Path, file_path: Path, module: str) -> Path | None:
+    level = len(module) - len(module.lstrip("."))
+    remainder = module[level:]
+    base = file_path.parent
+    for _ in range(max(level - 1, 0)):
+        base = base.parent
+    if remainder:
+        base = base / Path(*remainder.split("."))
+    return resolve_candidate_base(target, base)
+
+
+def resolve_candidate_base(target: Path, base: Path) -> Path | None:
+    base = base.resolve()
     candidates = [base]
     candidates.extend(base.with_suffix(suffix) for suffix in CODE_EXTENSIONS | MARKDOWN_EXTENSIONS)
     candidates.extend((base / f"index{suffix}") for suffix in CODE_EXTENSIONS)
@@ -702,6 +895,35 @@ def resolve_relative_import(target: Path, file_path: Path, module: str) -> Path 
             continue
         if candidate.is_file():
             return normalize_existing_path_case(candidate)
+    return None
+
+
+def alias_candidate_bases(target: Path, module: str, aliases: tuple[ImportAlias, ...]) -> list[Path]:
+    bases: list[Path] = []
+    for alias in aliases:
+        replaced = apply_alias(module, alias)
+        if replaced:
+            bases.append(target / replaced)
+    return bases
+
+
+def apply_alias(module: str, alias: ImportAlias) -> str | None:
+    pattern = alias.pattern
+    target = alias.target
+    if "*" in pattern:
+        prefix, suffix = pattern.split("*", 1)
+        if not module.startswith(prefix) or (suffix and not module.endswith(suffix)):
+            return None
+        middle_end = len(module) - len(suffix) if suffix else len(module)
+        wildcard = module[len(prefix):middle_end]
+        return target.replace("*", wildcard)
+    clean_pattern = pattern.rstrip("/")
+    clean_target = target.rstrip("/")
+    if module == clean_pattern:
+        return clean_target
+    if module.startswith(f"{clean_pattern}/"):
+        rest = module[len(clean_pattern) + 1 :]
+        return f"{clean_target}/{rest}"
     return None
 
 

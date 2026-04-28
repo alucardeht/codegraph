@@ -47,14 +47,24 @@ class FileArchitecture:
     domain: str
 
 
-def enrich_architecture(graph: Graph) -> None:
+def enrich_architecture(
+    graph: Graph,
+    *,
+    feature_markers: tuple[str, ...] = (),
+    generic_feature_names: tuple[str, ...] = (),
+) -> None:
     file_nodes = {
         node_id: node
         for node_id, node in graph.nodes.items()
         if node.kind == "file" and node.source_path
     }
     architecture_by_file = {
-        node_id: classify_file_architecture(node.source_path or "", node.attributes)
+        node_id: classify_file_architecture(
+            node.source_path or "",
+            node.attributes,
+            feature_markers=feature_markers,
+            generic_feature_names=generic_feature_names,
+        )
         for node_id, node in file_nodes.items()
     }
     add_architecture_hubs(graph, architecture_by_file)
@@ -62,7 +72,13 @@ def enrich_architecture(graph: Graph) -> None:
     add_import_role_edges(graph, architecture_by_file)
 
 
-def classify_file_architecture(source_path: str, attributes: dict[str, Any]) -> FileArchitecture:
+def classify_file_architecture(
+    source_path: str,
+    attributes: dict[str, Any],
+    *,
+    feature_markers: tuple[str, ...] = (),
+    generic_feature_names: tuple[str, ...] = (),
+) -> FileArchitecture:
     path = Path(source_path)
     parts = path.parts
     lowered_parts = tuple(part.lower() for part in parts)
@@ -72,7 +88,15 @@ def classify_file_architecture(source_path: str, attributes: dict[str, Any]) -> 
     area = parts[0] if len(parts) > 1 else "root"
     layer = infer_layer(lowered_parts, lowered_name, domain)
     role = infer_role(lowered_parts, lowered_name, domain)
-    feature = infer_feature(parts, lowered_parts, lowered_name, layer, domain)
+    feature = infer_feature(
+        parts,
+        lowered_parts,
+        lowered_name,
+        layer,
+        domain,
+        feature_markers=feature_markers,
+        generic_feature_names=generic_feature_names,
+    )
     return FileArchitecture(area=area, layer=layer, role=role, feature=feature, domain=domain)
 
 
@@ -148,31 +172,34 @@ def infer_feature(
     lowered_name: str,
     layer: str,
     domain: str,
+    feature_markers: tuple[str, ...] = (),
+    generic_feature_names: tuple[str, ...] = (),
 ) -> str | None:
     if not parts:
         return None
-    for marker in ("modules", "features"):
+    generic_names = GENERIC_FEATURE_NAMES | {item.lower() for item in generic_feature_names}
+    for marker in tuple(item.lower() for item in feature_markers) + ("modules", "features"):
         if marker in lowered_parts:
             index = lowered_parts.index(marker)
             if index + 1 < len(parts):
-                return normalized_feature_name(parts[index + 1])
+                return normalized_feature_name(parts[index + 1], generic_names)
     for marker in ("screens", "pages", "routes"):
         if marker in lowered_parts:
             index = lowered_parts.index(marker)
             if index + 1 < len(parts):
                 candidate = parts[index + 1]
-                return normalized_feature_name(candidate)
+                return normalized_feature_name(candidate, generic_names)
     for marker in ("components", "widgets"):
         if marker in lowered_parts:
             index = lowered_parts.index(marker)
             if index + 1 < len(parts):
-                return normalized_feature_name(parts[index + 1])
+                return normalized_feature_name(parts[index + 1], generic_names)
     if len(parts) > 2 and lowered_parts[0] in {"src", "app", "lib"}:
-        candidate = normalized_feature_name(parts[1])
-        if candidate and candidate.lower() not in GENERIC_FEATURE_NAMES:
+        candidate = normalized_feature_name(parts[1], generic_names)
+        if candidate and candidate.lower() not in generic_names:
             return candidate
     if domain in {"documentation", "configuration"} and len(parts) > 2:
-        return normalized_feature_name(parts[0])
+        return normalized_feature_name(parts[0], generic_names)
     if lowered_name in {"readme.md", "package.json", "pyproject.toml"}:
         return "project"
     return None
@@ -281,10 +308,14 @@ def remove_extension(value: str) -> str:
     return value
 
 
-def normalized_feature_name(value: str) -> str | None:
+def normalized_feature_name(
+    value: str,
+    generic_names: set[str] | None = None,
+) -> str | None:
     candidate = remove_extension(value)
+    generic = generic_names or GENERIC_FEATURE_NAMES
     if not candidate:
         return None
-    if candidate.lower() in GENERIC_FEATURE_NAMES:
+    if candidate.lower() in generic:
         return None
     return candidate

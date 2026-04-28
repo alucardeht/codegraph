@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import time
+import webbrowser
 from pathlib import Path
 
 from .overview import graph_doctor, graph_overview
-from .scanner import ScanOptions, scan
-from .query import query_subgraph
+from .scanner import OBSIDIAN_DIR, ScanOptions, scan, write_obsidian_export
+from .query import load_graph, query_subgraph
 from .status import graph_status, load_manifest
 
 
@@ -27,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
                     allow_output_inside_target=args.allow_output_inside_target,
                     export_obsidian=args.export_obsidian,
                     replace_output=args.replace_output,
+                    config=Path(args.config) if args.config else None,
                 )
             )
             print(f"Graph written to {manifest['output']}")
@@ -63,6 +66,7 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     export_obsidian=bool(options.get("export_obsidian", False)),
                     replace_output=True,
+                    config=Path(options["config"]) if options.get("config") else None,
                 )
             )
             print(f"Graph refreshed at {refreshed['output']}")
@@ -101,6 +105,32 @@ def main(argv: list[str] | None = None) -> int:
                     status = "pass" if item["passed"] else "fail"
                     print(f"- {item['name']}: {status} ({item['value']})")
             return 0 if result["status"] == "passed" else 2
+
+        if args.command == "export":
+            output = Path(args.output).resolve()
+            graph = load_graph(output)
+            manifest = load_manifest(output)
+            write_obsidian_export(output / OBSIDIAN_DIR, graph, manifest)
+            print(f"Obsidian export written to {output / OBSIDIAN_DIR}")
+            return 0
+
+        if args.command == "open":
+            obsidian_path = Path(args.output).resolve() / OBSIDIAN_DIR
+            if not obsidian_path.is_dir():
+                raise ValueError(f"No Obsidian export found at {obsidian_path}")
+            print(obsidian_path)
+            if args.system:
+                webbrowser.open(obsidian_path.as_uri())
+            return 0
+
+        if args.command == "clean":
+            output = Path(args.output).resolve()
+            if not args.yes:
+                raise ValueError("Refusing to delete output without --yes")
+            validate_managed_output(output)
+            shutil.rmtree(output)
+            print(f"Deleted managed graph output {output}")
+            return 0
     except ValueError as error:
         parser.exit(1, f"Error: {error}\n")
     return 1
@@ -146,6 +176,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Delete and recreate the entire --out directory before scanning. "
             "Use with care: every file inside that output directory is removed."
+        ),
+    )
+    scan_parser.add_argument(
+        "--config",
+        help=(
+            "Optional codegraph.toml path. Defaults to codegraph.toml in the target root "
+            "when present."
         ),
     )
 
@@ -201,12 +238,43 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("output", help="Existing graph output directory.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable diagnostics.")
 
+    export_parser = subparsers.add_parser(
+        "export",
+        help="Rebuild human exports from an existing ready graph.",
+    )
+    export_parser.add_argument("output", help="Existing graph output directory.")
+
+    open_parser = subparsers.add_parser(
+        "open",
+        help="Print the Obsidian export path, optionally opening it with the system default app.",
+    )
+    open_parser.add_argument("output", help="Existing graph output directory.")
+    open_parser.add_argument(
+        "--system",
+        action="store_true",
+        help="Open the Obsidian export directory using the system default handler.",
+    )
+
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Delete a managed graph output directory. Requires --yes.",
+    )
+    clean_parser.add_argument("output", help="Existing graph output directory.")
+    clean_parser.add_argument("--yes", action="store_true", help="Confirm deletion of the output directory.")
+
     return parser
 
 
 def require_output(output: str | None) -> None:
     if not output:
         raise ValueError("Output directory is required. Pass --out explicitly.")
+
+
+def validate_managed_output(output: Path) -> None:
+    if not output.is_dir():
+        raise ValueError(f"Output directory does not exist: {output}")
+    if not (output / "manifest.json").is_file() or not (output / "graph.json").is_file():
+        raise ValueError(f"Refusing to delete unmanaged directory: {output}")
 
 
 def watch(output: Path, *, interval: float) -> None:
@@ -230,6 +298,7 @@ def watch(output: Path, *, interval: float) -> None:
                         ),
                         export_obsidian=bool(options.get("export_obsidian", False)),
                         replace_output=True,
+                        config=Path(options["config"]) if options.get("config") else None,
                     )
                 )
             time.sleep(interval)

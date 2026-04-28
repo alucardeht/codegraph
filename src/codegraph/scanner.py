@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .architecture import enrich_architecture
+from .config import config_fingerprint, load_codegraph_config
 from .extractors import classify_content_domain, extract_file_content
 from .graph import Graph
 from .ignore import IgnorePolicy
@@ -33,6 +34,7 @@ class ScanOptions:
     allow_output_inside_target: bool = False
     export_obsidian: bool = False
     replace_output: bool = False
+    config: Path | None = None
 
 
 def scan(options: ScanOptions) -> dict[str, Any]:
@@ -43,12 +45,16 @@ def scan(options: ScanOptions) -> dict[str, Any]:
     mark_not_ready(output)
 
     started_at = utc_now()
+    config = load_codegraph_config(target, options.config)
+    include = tuple(config.include) + options.include
+    disable_default_ignore = tuple(config.disable_default_ignore) + options.disable_default_ignore
+    no_default_ignores = options.no_default_ignores or config.no_default_ignores
     runtime_ignore = runtime_ignore_patterns(target, output)
     policy = IgnorePolicy(
         target=target,
-        include=list(options.include),
-        disable_default=list(options.disable_default_ignore),
-        no_default_ignores=options.no_default_ignores,
+        include=list(include),
+        disable_default=list(disable_default_ignore),
+        no_default_ignores=no_default_ignores,
         runtime_ignore=runtime_ignore,
     )
     graph = Graph()
@@ -76,7 +82,7 @@ def scan(options: ScanOptions) -> dict[str, Any]:
             Path(relative).name,
             source_path=relative,
             attributes={
-                "content_domain": classify_content_domain(file_path),
+                "content_domain": classify_content_domain(Path(relative)),
                 "extension": file_path.suffix.lower(),
                 "size": fingerprints[relative]["size"],
                 "sha256": fingerprints[relative]["sha256"],
@@ -84,9 +90,20 @@ def scan(options: ScanOptions) -> dict[str, Any]:
         )
         parent = parent_node_id(relative)
         graph.add_edge(kind="contains", source=parent, target=file_node, confidence="PROVEN")
-        extraction_results.append(extract_file_content(graph, target, file_path).to_dict())
+        extraction_results.append(
+            extract_file_content(
+                graph,
+                target,
+                file_path,
+                import_aliases=config.import_aliases,
+            ).to_dict()
+        )
 
-    enrich_architecture(graph)
+    enrich_architecture(
+        graph,
+        feature_markers=config.feature_markers,
+        generic_feature_names=config.generic_feature_names,
+    )
 
     ended_at = utc_now()
     graph_payload = {
@@ -104,13 +121,16 @@ def scan(options: ScanOptions) -> dict[str, Any]:
         "output": str(output),
         "freshness": "current",
         "scan_options": {
-            "include": list(options.include),
-            "disable_default_ignore": list(options.disable_default_ignore),
-            "no_default_ignores": options.no_default_ignores,
+            "include": list(include),
+            "disable_default_ignore": list(disable_default_ignore),
+            "no_default_ignores": no_default_ignores,
             "allow_output_inside_target": options.allow_output_inside_target,
             "export_obsidian": options.export_obsidian,
             "replace_output": options.replace_output,
+            "config": str(config.path) if config.path else None,
         },
+        "config": config.to_dict(),
+        "config_fingerprint": config_fingerprint(config),
         "ignore_policy": policy.to_dict(),
         "source_fingerprints": fingerprints,
         "extraction_results": extraction_results,
@@ -487,6 +507,9 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
                 "",
                 "## Navigation",
                 "",
+                "- [[Dashboards/Architecture|Architecture Dashboard]]",
+                "- [[Dashboards/Features|Feature Dashboard]]",
+                "- [[Dashboards/Layers|Layer Dashboard]]",
                 "- [[Indexes/Architecture|Architecture]]",
                 "- [[Indexes/Features|Features]]",
                 "- [[Indexes/Layers|Layers]]",
@@ -515,6 +538,7 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
     )
 
     write_obsidian_indexes(path, graph_payload, node_note_paths)
+    write_obsidian_dashboards(path, graph_payload, node_note_paths)
     for node in graph_payload["nodes"]:
         note_relative = node_note_paths[node["id"]]
         note_path = path / f"{note_relative}.md"
@@ -691,6 +715,121 @@ def write_obsidian_indexes(
         None,
         exclude_kinds=indexed_kinds,
     )
+
+
+def write_obsidian_dashboards(
+    path: Path,
+    graph_payload: dict[str, Any],
+    node_note_paths: dict[str, str],
+) -> None:
+    dashboards_dir = path / "Dashboards"
+    dashboards_dir.mkdir(exist_ok=True)
+    incoming_by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for edge in graph_payload["edges"]:
+        incoming_by_target[edge["to"]].append(edge)
+    nodes_by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for node in graph_payload["nodes"]:
+        nodes_by_kind[node["kind"]].append(node)
+
+    write_architecture_dashboard(
+        dashboards_dir / "Architecture.md",
+        graph_payload,
+        node_note_paths,
+        nodes_by_kind,
+        incoming_by_target,
+    )
+    write_ranked_architecture_dashboard(
+        dashboards_dir / "Features.md",
+        "Features",
+        nodes_by_kind["feature"],
+        node_note_paths,
+        incoming_by_target,
+    )
+    write_ranked_architecture_dashboard(
+        dashboards_dir / "Layers.md",
+        "Layers",
+        nodes_by_kind["layer"],
+        node_note_paths,
+        incoming_by_target,
+    )
+
+
+def write_architecture_dashboard(
+    path: Path,
+    graph_payload: dict[str, Any],
+    node_note_paths: dict[str, str],
+    nodes_by_kind: dict[str, list[dict[str, Any]]],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+) -> None:
+    lines = [
+        "# Architecture Dashboard",
+        "",
+        f"- Nodes: {len(graph_payload['nodes'])}",
+        f"- Edges: {len(graph_payload['edges'])}",
+        f"- Areas: {len(nodes_by_kind['area'])}",
+        f"- Domains: {len(nodes_by_kind['domain'])}",
+        f"- Layers: {len(nodes_by_kind['layer'])}",
+        f"- Roles: {len(nodes_by_kind['role'])}",
+        f"- Features: {len(nodes_by_kind['feature'])}",
+        "",
+    ]
+    for title, kind in (
+        ("Top Areas", "area"),
+        ("Top Domains", "domain"),
+        ("Top Layers", "layer"),
+        ("Top Roles", "role"),
+        ("Top Features", "feature"),
+    ):
+        lines.extend([f"## {title}", ""])
+        lines.extend(
+            render_ranked_architecture_links(
+                nodes_by_kind[kind],
+                node_note_paths,
+                incoming_by_target,
+                limit=15,
+            )
+        )
+        lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_ranked_architecture_dashboard(
+    path: Path,
+    title: str,
+    nodes: list[dict[str, Any]],
+    node_note_paths: dict[str, str],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+) -> None:
+    lines = [f"# {title}", ""]
+    lines.extend(render_ranked_architecture_links(nodes, node_note_paths, incoming_by_target, limit=None))
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def render_ranked_architecture_links(
+    nodes: list[dict[str, Any]],
+    node_note_paths: dict[str, str],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    *,
+    limit: int | None,
+) -> list[str]:
+    ranked = sorted(
+        nodes,
+        key=lambda node: (-architecture_link_count(incoming_by_target[node["id"]]), node["id"]),
+    )
+    if limit is not None:
+        ranked = ranked[:limit]
+    if not ranked:
+        return ["- None"]
+    return [
+        f"- [[{node_note_paths[node['id']]}|{node['label']}]] "
+        f"({architecture_link_count(incoming_by_target[node['id']])} linked files)"
+        for node in ranked
+    ]
+
+
+def architecture_link_count(edges: list[dict[str, Any]]) -> int:
+    return sum(1 for edge in edges if edge["kind"] in {"belongs_to", "categorized_as"})
 
 
 def write_obsidian_index(

@@ -1,0 +1,5 @@
+[imports.aliases]
+"@/*" = "src/*"
+
+[architecture]
+feature_markers = ["domains"]

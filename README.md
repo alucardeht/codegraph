@@ -9,8 +9,8 @@ folders, configuration, logs, and mixed technical collections. It is designed to
 give both humans and AI agents a strong first map of a target without writing
 artifacts into that target by default.
 
-It is not a Graphify wrapper, not tied to TypeScript, and not limited to
-software repositories.
+It is not a wrapper around another graph tool, not tied to TypeScript, and not
+limited to software repositories.
 
 ## Product Contract
 

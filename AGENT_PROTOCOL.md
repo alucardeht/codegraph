@@ -16,8 +16,9 @@ reading the source when a change must be made.
 5. Run `codegraph overview <output> --limit 20`.
 6. Choose entrypoints from `agent_entrypoints`, `architecture`, or
    `important_files`.
-7. Run `codegraph query <output> --node <entrypoint>` with focused traversal.
-8. Read source files only after the graph has narrowed the likely area.
+7. When a narrower machine-readable slice is useful, run
+   `codegraph query <output> --node <entrypoint>` with focused traversal.
+8. Read source files after the graph has narrowed the likely area.
 
 ## Trust Rules
 
@@ -31,9 +32,13 @@ reading the source when a change must be made.
 
 Never present stale graph data as current.
 
-## Query Defaults
+## Focused Subgraph Command
 
-Default `query` behavior is intentionally compact:
+`codegraph query` is a graph subgraph inspector, not a search engine. Use it
+after `overview` has identified a concrete node, file, feature, layer, role,
+domain, symbol, concept, claim, or external module to inspect.
+
+Default behavior is intentionally compact:
 
 - outgoing traversal
 - no containment traversal
@@ -72,24 +77,24 @@ shape. Containment can expand quickly on large targets.
 ## Impact Analysis Pattern
 
 1. Start with the changed file, symbol, feature, layer, or external module.
-2. Query incoming edges first to find dependents.
-3. Query outgoing edges to find dependencies.
+2. Inspect incoming edges first to find dependents.
+3. Inspect outgoing edges to find dependencies.
 4. Inspect evidence on critical edges.
 5. Read only the files returned by the focused subgraph before broad search.
 
 Example:
 
 ```bash
-codegraph query graph-out --node imported-symbol:react-native#TouchableOpacity --direction in --depth 1
+codegraph query graph-out --node imported-symbol:legacy-sdk#OldClient --direction in --depth 1
 ```
 
 ## Migration Pattern
 
-1. Query the old API or symbol.
+1. Inspect the old API or symbol with a focused subgraph.
 2. Rank returned files by feature and layer from `overview`.
 3. Migrate one feature/layer slice at a time.
 4. Refresh the graph after the migration.
-5. Query the old API again to confirm no known usages remain.
+5. Inspect the old API again to confirm no known usages remain.
 
 ## Human Handoff
 
@@ -98,7 +103,6 @@ When reporting graph-backed findings to a human, include:
 - freshness
 - doctor status
 - quality status
-- query command used
+- focused graph command used
 - confidence class of important edges
 - any partial/untrusted warnings
-

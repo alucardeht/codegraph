@@ -1791,14 +1791,14 @@ def resolve_candidate_base(target: Path, base: Path, *, context: ExtractionConte
     candidates.extend(base.with_suffix(suffix) for suffix in CODE_EXTENSIONS | MARKDOWN_EXTENSIONS)
     candidates.extend((base / f"index{suffix}") for suffix in CODE_EXTENSIONS)
     for candidate in candidates:
+        candidate = normalize_existing_path_case(candidate, context=context)
         try:
             candidate.relative_to(target)
         except ValueError:
             continue
         if candidate.is_file():
-            resolved = normalize_existing_path_case(candidate, context=context)
-            context.candidate_resolution_cache[cache_key] = resolved
-            return resolved
+            context.candidate_resolution_cache[cache_key] = candidate
+            return candidate
     context.candidate_resolution_cache[cache_key] = None
     return None
 

@@ -289,8 +289,11 @@ Important sections:
 - `index.md`: freshness, quality, totals, and navigation.
 - `Dashboards/Architecture.md`: ranked architecture summary.
 - `Dashboards/Entrypoints.md`: recommended starts for humans and agents.
+- `Dashboards/Domains.md`: material-domain hubs with linked file reasons.
+- `Dashboards/Roles.md`: role hubs with linked file reasons.
 - `Dashboards/Features.md`: ranked feature summary.
 - `Dashboards/Layers.md`: ranked layer summary.
+- `Dashboards/Graph Views.md`: human-readable graph search presets.
 - `Dashboards/Research.md`: concepts and claims from documentation/research.
 - `Indexes/Architecture.md`: high-level architecture nodes.
 - `Indexes/Features.md`: product/topic groupings.
@@ -307,6 +310,14 @@ Important sections:
 
 The default graph view search is tuned toward `Architecture` and `Files` so the
 first visual impression is structural instead of a dense cloud of every symbol.
+`Dashboards/Graph Views.md` also records human-readable filter presets without
+depending on undocumented Obsidian vault schema beyond the generated
+`.obsidian/graph.json`.
+
+Architecture dashboards include trust notes and now surface top linked files
+with visible `belongs_to` / `categorized_as` reasons plus semantic edge counts.
+Treat those hubs as orientation for where to look next, then confirm the linked
+source note or file before making edits.
 
 ## Agent Workflow
 
@@ -336,8 +347,10 @@ For a human reading a target:
 2. Open `<output>/obsidian` as a vault or copy/link it into an existing vault.
 3. Start from `index.md`.
 4. Open the graph view; the default filter emphasizes Architecture and Files.
-5. Use `Indexes/Features.md`, `Indexes/Layers.md`, and `Indexes/Roles.md` to
-   pivot between product concepts and implementation surfaces.
+5. Use `Dashboards/Features.md`, `Dashboards/Layers.md`, `Dashboards/Domains.md`,
+   and `Dashboards/Roles.md` to pivot from hubs into concrete files with visible
+   reasons and counts.
+6. Check the trust notes before treating inferred architecture as planning proof.
 
 ## Quality Status
 

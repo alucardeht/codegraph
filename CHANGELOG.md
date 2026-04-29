@@ -19,7 +19,10 @@
   content domain without penalizing non-code collections for code-style density.
 - Obsidian entrypoints dashboard for human and agent starts.
 - Obsidian research dashboard and indexes for concepts and claims.
-- Obsidian dashboards for architecture, features, and layers.
+- Obsidian dashboards for architecture, domains, roles, features, layers, and graph-view presets.
+- Trust notes across index and key dashboards for freshness, quality, inferred architecture guidance, and source verification.
+- Feature and layer dashboards now show top linked files with visible architecture reasons and semantic edge counts.
+- Stronger Obsidian note-path collision handling for case-insensitive filesystems and reserved static paths, with matching doctor checks.
 - Operator commands for export rebuilds, Obsidian export path discovery, and
   confirmed output cleanup.
 - Agent protocol, benchmark fixtures, release checklist, and CI workflow.

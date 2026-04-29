@@ -13,7 +13,7 @@ from codegraph import extractors as extractor_module
 from codegraph.cli import main
 from codegraph.extractors import ExtractionContext, classify_content_domain, resolve_import
 from codegraph.ignore import IgnorePolicy
-from codegraph.scanner import ScanOptions, scan
+from codegraph.scanner import ScanOptions, unique_obsidian_note_paths, scan
 from codegraph.status import graph_status
 
 
@@ -57,11 +57,15 @@ class CodegraphTests(unittest.TestCase):
             self.assertTrue((output / "obsidian" / "Indexes" / "Layers.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Architecture.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Entrypoints.md").is_file())
+            self.assertTrue((output / "obsidian" / "Dashboards" / "Domains.md").is_file())
+            self.assertTrue((output / "obsidian" / "Dashboards" / "Roles.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Features.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Layers.md").is_file())
+            self.assertTrue((output / "obsidian" / "Dashboards" / "Graph Views.md").is_file())
             self.assertTrue(
                 (output / "obsidian" / "Symbols" / "app.py__App_L5.md").is_file()
             )
+            index = (output / "obsidian" / "index.md").read_text(encoding="utf-8")
             self.assertGreaterEqual(len(graph["nodes"]), 5)
             self.assertTrue(any(edge["kind"] == "references" for edge in graph["edges"]))
             self.assertTrue(any(edge["kind"] == "imports" for edge in graph["edges"]))
@@ -75,6 +79,9 @@ class CodegraphTests(unittest.TestCase):
             self.assertEqual(manifest["quality"]["invalid_source_path_count"], 0)
             self.assertIn("quality_gates", manifest["quality"])
             self.assertIn("documentation", manifest["quality"]["content_domain_counts"])
+            self.assertIn("[[Dashboards/Graph Views|Graph Views Dashboard]]", index)
+            self.assertIn("## Trust Notes", index)
+            self.assertIn("Verify the linked source note or file before making edits", index)
             self.assertTrue(
                 any(
                     item["extractor"] == "python.ast"
@@ -102,6 +109,12 @@ class CodegraphTests(unittest.TestCase):
             doctor = json.loads(doctor_stdout.getvalue())
             self.assertEqual(doctor_code, 0)
             self.assertEqual(doctor["status"], "passed")
+            self.assertTrue(
+                any(item["name"] == "obsidian_note_paths_unique_casefold" and item["passed"] for item in doctor["checks"])
+            )
+            self.assertTrue(
+                any(item["name"] == "obsidian_note_paths_not_reserved" and item["passed"] for item in doctor["checks"])
+            )
 
             with contextlib.redirect_stdout(io.StringIO()) as export_stdout:
                 export_code = main(["export", str(output)])
@@ -141,6 +154,56 @@ class CodegraphTests(unittest.TestCase):
             self.assertIn("## Agent Sequence", entrypoints)
             self.assertIn("## Important Files", entrypoints)
             self.assertIn("HomeScreen.tsx", entrypoints)
+
+    def test_obsidian_architecture_dashboards_show_top_files_and_graph_views(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "src" / "screens").mkdir(parents=True)
+            (target / "src" / "hooks").mkdir(parents=True)
+            (target / "src" / "api").mkdir(parents=True)
+            (target / "src" / "screens" / "CheckoutScreen.tsx").write_text(
+                "import { useCheckout } from '../hooks/useCheckout'\n"
+                "import { fetchCheckout } from '../api/checkoutApi'\n"
+                "export function CheckoutScreen() { useCheckout(); return fetchCheckout() }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "hooks" / "useCheckout.ts").write_text(
+                "export function useCheckout() { return null }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "api" / "checkoutApi.ts").write_text(
+                "export function fetchCheckout() { return null }\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output, export_obsidian=True))
+
+            features = (output / "obsidian" / "Dashboards" / "Features.md").read_text(encoding="utf-8")
+            layers = (output / "obsidian" / "Dashboards" / "Layers.md").read_text(encoding="utf-8")
+            roles = (output / "obsidian" / "Dashboards" / "Roles.md").read_text(encoding="utf-8")
+            domains = (output / "obsidian" / "Dashboards" / "Domains.md").read_text(encoding="utf-8")
+            graph_views = (output / "obsidian" / "Dashboards" / "Graph Views.md").read_text(
+                encoding="utf-8"
+            )
+            architecture = (output / "obsidian" / "Dashboards" / "Architecture.md").read_text(
+                encoding="utf-8"
+            )
+
+            self.assertIn("## Top Hubs With Files", features)
+            self.assertIn("CheckoutScreen.tsx", features)
+            self.assertIn("belongs_to x1", features)
+            self.assertIn("semantic edges", features)
+            self.assertIn("## Top Hubs With Files", layers)
+            self.assertIn("CheckoutScreen.tsx", layers)
+            self.assertIn("## Trust Notes", roles)
+            self.assertIn("## Trust Notes", domains)
+            self.assertIn("Use these search presets in the Obsidian graph view search box.", graph_views)
+            self.assertIn("`path:Architecture OR path:Files`", graph_views)
+            self.assertIn("[[Dashboards/Domains|Domains Dashboard]]", architecture)
+            self.assertIn("[[Dashboards/Roles|Roles Dashboard]]", architecture)
+            self.assertIn("[[Dashboards/Graph Views|Graph Views Dashboard]]", architecture)
 
     def test_architecture_enrichment_links_roles_layers_and_import_relationships(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -942,6 +1005,54 @@ class CodegraphTests(unittest.TestCase):
             self.assertTrue(
                 (output / "obsidian" / "Observability" / "runtime.log__ERROR_L2.md").is_file()
             )
+
+    def test_obsidian_export_keeps_casefold_colliding_notes_unique(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            target.mkdir()
+            (target / "settings.json").write_text(
+                '{\n  "Name": "Upper",\n  "name": "Lower"\n}\n',
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output, export_obsidian=True))
+
+            config_dir = output / "obsidian" / "Config"
+            config_notes = [path.name for path in config_dir.iterdir() if path.name.startswith("settings.json__")]
+
+            self.assertGreaterEqual(len(config_notes), 2)
+            self.assertEqual(len(config_notes), len({name.casefold() for name in config_notes}))
+
+            doctor_stdout = io.StringIO()
+            with contextlib.redirect_stdout(doctor_stdout):
+                doctor_code = main(["doctor", str(output), "--json"])
+            doctor = json.loads(doctor_stdout.getvalue())
+
+            self.assertEqual(doctor_code, 0)
+            self.assertEqual(doctor["status"], "passed")
+            self.assertTrue(
+                any(item["name"] == "obsidian_note_paths_unique_casefold" and item["passed"] for item in doctor["checks"])
+            )
+
+    def test_unique_obsidian_note_paths_avoid_reserved_and_casefold_collisions(self) -> None:
+        nodes = [
+            {"id": "node:a", "kind": "file", "label": "a", "source_path": "a", "range": None},
+            {"id": "node:b", "kind": "file", "label": "b", "source_path": "b", "range": None},
+            {"id": "node:c", "kind": "file", "label": "c", "source_path": "c", "range": None},
+        ]
+
+        with mock.patch(
+            "codegraph.scanner.obsidian_note_path",
+            side_effect=["index", "Index", "Dashboards/Features"],
+        ):
+            note_paths = unique_obsidian_note_paths(nodes)
+
+        normalized = {value.casefold() for value in note_paths.values()}
+        self.assertEqual(len(normalized), len(note_paths))
+        self.assertNotIn("index", normalized)
+        self.assertNotIn("dashboards/features", normalized)
 
     def test_obsidian_export_exposes_research_navigation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

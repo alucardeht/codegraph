@@ -29,6 +29,13 @@ OBSIDIAN_DIR = "obsidian"
 READY_FILE = ".ready"
 EXTRACTION_CACHE_DIR = "cache/extractions"
 EXTRACTION_CACHE_SCHEMA_VERSION = 1
+ARCHITECTURE_EDGE_KINDS = {"belongs_to", "categorized_as"}
+OBSIDIAN_TRUST_NOTES = (
+    "- Freshness tells you whether this export reflects the current target state.",
+    "- Quality shows graph coverage; treat `partial` and `untrusted` as investigation warnings.",
+    "- Architecture hubs and `belongs_to` / `categorized_as` links are inferred guidance, not proof.",
+    "- Verify the linked source note or file before making edits or planning from this export alone.",
+)
 
 
 @dataclass(frozen=True)
@@ -831,12 +838,8 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
     write_json(path / ".obsidian" / "graph.json", obsidian_graph_settings())
 
     node_note_paths = unique_obsidian_note_paths(graph_payload["nodes"])
-    nodes_by_id = {node["id"]: node for node in graph_payload["nodes"]}
-    outgoing_edges: dict[str, list[dict[str, Any]]] = {}
-    incoming_edges: dict[str, list[dict[str, Any]]] = {}
-    for edge in graph_payload["edges"]:
-        outgoing_edges.setdefault(edge["from"], []).append(edge)
-        incoming_edges.setdefault(edge["to"], []).append(edge)
+    nodes_by_id = obsidian_nodes_by_id(graph_payload["nodes"])
+    incoming_edges, outgoing_edges = obsidian_edge_indexes(graph_payload["edges"])
 
     (path / "index.md").write_text(
         "\n".join(
@@ -853,8 +856,11 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
                 "",
                 "- [[Dashboards/Architecture|Architecture Dashboard]]",
                 "- [[Dashboards/Entrypoints|Entrypoints Dashboard]]",
+                "- [[Dashboards/Domains|Domains Dashboard]]",
+                "- [[Dashboards/Roles|Roles Dashboard]]",
                 "- [[Dashboards/Features|Feature Dashboard]]",
                 "- [[Dashboards/Layers|Layer Dashboard]]",
+                "- [[Dashboards/Graph Views|Graph Views Dashboard]]",
                 "- [[Dashboards/Research|Research Dashboard]]",
                 "- [[Indexes/Architecture|Architecture]]",
                 "- [[Indexes/Features|Features]]",
@@ -880,13 +886,24 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
                     for key, value in sorted(manifest["quality"].items())
                 ],
                 "",
+                "## Trust Notes",
+                "",
+                *OBSIDIAN_TRUST_NOTES,
+                "",
             ]
         ),
         encoding="utf-8",
     )
 
     write_obsidian_indexes(path, graph_payload, node_note_paths)
-    write_obsidian_dashboards(path, graph_payload, node_note_paths)
+    write_obsidian_dashboards(
+        path,
+        graph_payload,
+        node_note_paths,
+        nodes_by_id,
+        incoming_edges,
+        outgoing_edges,
+    )
     for node in graph_payload["nodes"]:
         note_relative = node_note_paths[node["id"]]
         note_path = path / f"{note_relative}.md"
@@ -920,16 +937,54 @@ def safe_note_name(value: str) -> str:
 
 
 def unique_obsidian_note_paths(nodes: list[dict[str, Any]]) -> dict[str, str]:
-    paths = {node["id"]: obsidian_note_path(node) for node in nodes}
-    grouped: dict[str, list[str]] = defaultdict(list)
-    for node_id, path in paths.items():
-        grouped[path].append(node_id)
-    for path, node_ids in grouped.items():
-        if len(node_ids) == 1:
-            continue
-        for node_id in sorted(node_ids):
-            paths[node_id] = f"{path}__{safe_note_name(node_id)}"
+    paths: dict[str, str] = {}
+    used = {normalize_obsidian_note_path(path) for path in obsidian_reserved_note_paths()}
+    for node in sorted(nodes, key=lambda item: item["id"]):
+        base_path = obsidian_note_path(node)
+        candidate = base_path
+        suffix = safe_note_name(node["id"])
+        attempt = 0
+        while normalize_obsidian_note_path(candidate) in used:
+            attempt += 1
+            extra = suffix if attempt == 1 else f"{suffix}_{attempt}"
+            candidate = f"{base_path}__{extra}"
+        paths[node["id"]] = candidate
+        used.add(normalize_obsidian_note_path(candidate))
     return paths
+
+
+def normalize_obsidian_note_path(path: str) -> str:
+    return path.casefold()
+
+
+def obsidian_reserved_note_paths() -> set[str]:
+    return {
+        "index",
+        "Dashboards/Architecture",
+        "Dashboards/Entrypoints",
+        "Dashboards/Domains",
+        "Dashboards/Roles",
+        "Dashboards/Features",
+        "Dashboards/Layers",
+        "Dashboards/Graph Views",
+        "Dashboards/Research",
+        "Indexes/Architecture",
+        "Indexes/Features",
+        "Indexes/Layers",
+        "Indexes/Roles",
+        "Indexes/Domains",
+        "Indexes/Files",
+        "Indexes/Symbols",
+        "Indexes/Modules",
+        "Indexes/Concepts",
+        "Indexes/Claims",
+        "Indexes/Assets",
+        "Indexes/Artifacts",
+        "Indexes/Config",
+        "Indexes/Observability",
+        "Indexes/Directories",
+        "Indexes/Other",
+    }
 
 
 def note_line_suffix(node: dict[str, Any]) -> str:
@@ -1035,6 +1090,21 @@ def render_obsidian_edge_links(
     return lines
 
 
+def obsidian_nodes_by_id(nodes: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {node["id"]: node for node in nodes}
+
+
+def obsidian_edge_indexes(
+    edges: list[dict[str, Any]],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    incoming_by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    outgoing_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for edge in edges:
+        incoming_by_target[edge["to"]].append(edge)
+        outgoing_by_source[edge["from"]].append(edge)
+    return incoming_by_target, outgoing_by_source
+
+
 def write_obsidian_indexes(
     path: Path,
     graph_payload: dict[str, Any],
@@ -1076,14 +1146,12 @@ def write_obsidian_dashboards(
     path: Path,
     graph_payload: dict[str, Any],
     node_note_paths: dict[str, str],
+    nodes_by_id: dict[str, dict[str, Any]],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
 ) -> None:
     dashboards_dir = path / "Dashboards"
     dashboards_dir.mkdir(exist_ok=True)
-    incoming_by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    outgoing_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for edge in graph_payload["edges"]:
-        incoming_by_target[edge["to"]].append(edge)
-        outgoing_by_source[edge["from"]].append(edge)
     nodes_by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in graph_payload["nodes"]:
         nodes_by_kind[node["kind"]].append(node)
@@ -1104,18 +1172,44 @@ def write_obsidian_dashboards(
         incoming_by_target,
     )
     write_ranked_architecture_dashboard(
+        dashboards_dir / "Domains.md",
+        "Domains",
+        nodes_by_kind["domain"],
+        node_note_paths,
+        nodes_by_id,
+        incoming_by_target,
+        outgoing_by_source,
+    )
+    write_ranked_architecture_dashboard(
+        dashboards_dir / "Roles.md",
+        "Roles",
+        nodes_by_kind["role"],
+        node_note_paths,
+        nodes_by_id,
+        incoming_by_target,
+        outgoing_by_source,
+    )
+    write_ranked_architecture_dashboard(
         dashboards_dir / "Features.md",
         "Features",
         nodes_by_kind["feature"],
         node_note_paths,
+        nodes_by_id,
         incoming_by_target,
+        outgoing_by_source,
     )
     write_ranked_architecture_dashboard(
         dashboards_dir / "Layers.md",
         "Layers",
         nodes_by_kind["layer"],
         node_note_paths,
+        nodes_by_id,
         incoming_by_target,
+        outgoing_by_source,
+    )
+    write_graph_views_dashboard(
+        dashboards_dir / "Graph Views.md",
+        nodes_by_kind,
     )
     write_research_dashboard(
         dashboards_dir / "Research.md",
@@ -1143,6 +1237,19 @@ def write_architecture_dashboard(
         f"- Roles: {len(nodes_by_kind['role'])}",
         f"- Features: {len(nodes_by_kind['feature'])}",
         "",
+        "## Linked Dashboards",
+        "",
+        "- [[Dashboards/Entrypoints|Entrypoints Dashboard]]",
+        "- [[Dashboards/Domains|Domains Dashboard]]",
+        "- [[Dashboards/Roles|Roles Dashboard]]",
+        "- [[Dashboards/Features|Feature Dashboard]]",
+        "- [[Dashboards/Layers|Layer Dashboard]]",
+        "- [[Dashboards/Graph Views|Graph Views Dashboard]]",
+        "",
+        "## Trust Notes",
+        "",
+        *OBSIDIAN_TRUST_NOTES,
+        "",
     ]
     for title, kind in (
         ("Top Areas", "area"),
@@ -1169,10 +1276,40 @@ def write_ranked_architecture_dashboard(
     title: str,
     nodes: list[dict[str, Any]],
     node_note_paths: dict[str, str],
+    nodes_by_id: dict[str, dict[str, Any]],
     incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
 ) -> None:
-    lines = [f"# {title}", ""]
+    lines = [
+        f"# {title}",
+        "",
+        "## Linked Dashboards",
+        "",
+        "- [[Dashboards/Architecture|Architecture Dashboard]]",
+        "- [[Dashboards/Entrypoints|Entrypoints Dashboard]]",
+        "- [[Dashboards/Domains|Domains Dashboard]]",
+        "- [[Dashboards/Roles|Roles Dashboard]]",
+        "- [[Dashboards/Features|Feature Dashboard]]",
+        "- [[Dashboards/Layers|Layer Dashboard]]",
+        "- [[Dashboards/Graph Views|Graph Views Dashboard]]",
+        "",
+        "## Trust Notes",
+        "",
+    ]
+    lines.extend(OBSIDIAN_TRUST_NOTES)
+    lines.extend(["", "## Ranked Hubs", ""])
     lines.extend(render_ranked_architecture_links(nodes, node_note_paths, incoming_by_target, limit=None))
+    lines.extend(["", "## Top Hubs With Files", ""])
+    lines.extend(
+        render_architecture_hub_details(
+            nodes,
+            node_note_paths,
+            nodes_by_id,
+            incoming_by_target,
+            outgoing_by_source,
+            file_limit=8,
+        )
+    )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -1194,6 +1331,17 @@ def write_entrypoints_dashboard(
         "- Run `doctor` before using the graph for planning.",
         "- Start with architecture, feature, layer, and important file entrypoints.",
         "- Use focused source inspection after the graph narrows the area.",
+        "",
+        "## Linked Dashboards",
+        "",
+        "- [[Dashboards/Architecture|Architecture Dashboard]]",
+        "- [[Dashboards/Domains|Domains Dashboard]]",
+        "- [[Dashboards/Roles|Roles Dashboard]]",
+        "- [[Dashboards/Graph Views|Graph Views Dashboard]]",
+        "",
+        "## Trust Notes",
+        "",
+        *OBSIDIAN_TRUST_NOTES,
         "",
         "## Top Features",
         "",
@@ -1256,6 +1404,10 @@ def write_research_dashboard(
         f"- Concepts: {len(nodes_by_kind['concept'])}",
         f"- Claims: {len(nodes_by_kind['claim'])}",
         "",
+        "## Trust Notes",
+        "",
+        *OBSIDIAN_TRUST_NOTES,
+        "",
         "## Top Concepts",
         "",
     ]
@@ -1284,6 +1436,118 @@ def write_research_dashboard(
     )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_graph_views_dashboard(path: Path, nodes_by_kind: dict[str, list[dict[str, Any]]]) -> None:
+    lines = [
+        "# Graph Views",
+        "",
+        "Use these search presets in the Obsidian graph view search box.",
+        "The generated `.obsidian/graph.json` keeps the default graph focused on architecture and files.",
+        "",
+        "## Trust Notes",
+        "",
+        *OBSIDIAN_TRUST_NOTES,
+        "",
+        "## Presets",
+        "",
+        "- Architecture first: `path:Architecture OR path:Files`",
+        "- Architecture only: `path:Architecture`",
+        "- Features and files: `path:Architecture/feature OR path:Files`",
+        "- Layers and files: `path:Architecture/layer OR path:Files`",
+        "- Roles and files: `path:Architecture/role OR path:Files`",
+        "- Domains and files: `path:Architecture/domain OR path:Files`",
+    ]
+    if nodes_by_kind["concept"] or nodes_by_kind["claim"]:
+        lines.extend(
+            [
+                "- Research overlays: `path:Concepts OR path:Claims OR path:Docs`",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Color Groups",
+            "",
+            "- `Architecture`: architecture hubs and inferred navigation.",
+            "- `Files`: concrete source-backed navigation anchors.",
+            "- `Symbols`, `Modules`, `Directories`, `Docs`, `Assets`, `Artifacts`, and `Other`: supporting detail layers.",
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def render_architecture_hub_details(
+    nodes: list[dict[str, Any]],
+    node_note_paths: dict[str, str],
+    nodes_by_id: dict[str, dict[str, Any]],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
+    *,
+    file_limit: int,
+) -> list[str]:
+    ranked = sorted(
+        nodes,
+        key=lambda node: (-architecture_link_count(incoming_by_target[node["id"]]), node["id"]),
+    )
+    if not ranked:
+        return ["- None"]
+    lines: list[str] = []
+    for node in ranked:
+        linked_files = linked_architecture_files(
+            node["id"],
+            nodes_by_id,
+            incoming_by_target,
+            outgoing_by_source,
+        )
+        lines.append(
+            f"### [[{node_note_paths[node['id']]}|{node['label']}]] "
+            f"({len(linked_files)} linked files)"
+        )
+        if not linked_files:
+            lines.extend(["", "- No linked files", ""])
+            continue
+        lines.append("")
+        for item in linked_files[:file_limit]:
+            reason_counts = ", ".join(
+                f"{kind} x{count}" for kind, count in sorted(item["reasons"].items())
+            )
+            lines.append(
+                f"- [[{node_note_paths[item['id']]}|{item['path']}]] "
+                f"({reason_counts}; {item['semantic_edges']} semantic edges)"
+            )
+        lines.append("")
+    return lines
+
+
+def linked_architecture_files(
+    hub_id: str,
+    nodes_by_id: dict[str, dict[str, Any]],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    files: dict[str, dict[str, Any]] = {}
+    for edge in incoming_by_target[hub_id]:
+        if edge["kind"] not in ARCHITECTURE_EDGE_KINDS:
+            continue
+        file_node = nodes_by_id.get(edge["from"])
+        if not file_node or file_node["kind"] != "file":
+            continue
+        current = files.setdefault(
+            edge["from"],
+            {
+                "id": edge["from"],
+                "path": file_node.get("source_path") or file_node["id"],
+                "reasons": Counter(),
+                "semantic_edges": semantic_edge_count(edge["from"], incoming_by_target, outgoing_by_source),
+            },
+        )
+        current["reasons"][edge["kind"]] += 1
+    return sorted(
+        files.values(),
+        key=lambda item: (-item["semantic_edges"], item["path"]),
+    )
 
 
 def render_ranked_file_links(
@@ -1367,7 +1631,7 @@ def render_ranked_architecture_links(
 
 
 def architecture_link_count(edges: list[dict[str, Any]]) -> int:
-    return sum(1 for edge in edges if edge["kind"] in {"belongs_to", "categorized_as"})
+    return sum(1 for edge in edges if edge["kind"] in ARCHITECTURE_EDGE_KINDS)
 
 
 def edge_kind_count(edges: list[dict[str, Any]], kinds: set[str]) -> int:

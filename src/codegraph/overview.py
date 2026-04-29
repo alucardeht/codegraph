@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from .query import load_graph
-from .scanner import MANIFEST_FILE, OBSIDIAN_DIR, unique_obsidian_note_paths
+from .scanner import (
+    MANIFEST_FILE,
+    OBSIDIAN_DIR,
+    normalize_obsidian_note_path,
+    obsidian_reserved_note_paths,
+    unique_obsidian_note_paths,
+)
 from .status import graph_status, load_manifest
 
 
@@ -195,6 +201,13 @@ def graph_doctor(output: Path) -> dict[str, Any]:
     if obsidian_path.exists():
         note_paths = unique_obsidian_note_paths(graph["nodes"])
         duplicates = duplicate_values(note_paths)
+        casefold_duplicates = duplicate_normalized_values(note_paths)
+        reserved_collisions = [
+            note_path
+            for note_path in note_paths.values()
+            if normalize_obsidian_note_path(note_path)
+            in {normalize_obsidian_note_path(path) for path in obsidian_reserved_note_paths()}
+        ]
         missing_notes = [
             note_path
             for note_path in note_paths.values()
@@ -203,6 +216,8 @@ def graph_doctor(output: Path) -> dict[str, Any]:
         checks.extend(
             [
                 check("obsidian_note_paths_unique", not duplicates, len(duplicates)),
+                check("obsidian_note_paths_unique_casefold", not casefold_duplicates, len(casefold_duplicates)),
+                check("obsidian_note_paths_not_reserved", not reserved_collisions, len(reserved_collisions)),
                 check("obsidian_notes_present", not missing_notes, len(missing_notes)),
                 check("obsidian_graph_settings", (obsidian_path / ".obsidian" / "graph.json").is_file(), "graph.json"),
             ]
@@ -226,4 +241,9 @@ def check(name: str, passed: bool, value: Any) -> dict[str, Any]:
 
 def duplicate_values(values: dict[str, str]) -> dict[str, int]:
     counts = Counter(values.values())
+    return {value: count for value, count in counts.items() if count > 1}
+
+
+def duplicate_normalized_values(values: dict[str, str]) -> dict[str, int]:
+    counts = Counter(normalize_obsidian_note_path(value) for value in values.values())
     return {value: count for value, count in counts.items() if count > 1}

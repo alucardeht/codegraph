@@ -281,6 +281,7 @@ Important sections:
 
 - `index.md`: freshness, quality, totals, and navigation.
 - `Dashboards/Architecture.md`: ranked architecture summary.
+- `Dashboards/Entrypoints.md`: recommended starts for humans and agents.
 - `Dashboards/Features.md`: ranked feature summary.
 - `Dashboards/Layers.md`: ranked layer summary.
 - `Dashboards/Research.md`: concepts and claims from documentation/research.

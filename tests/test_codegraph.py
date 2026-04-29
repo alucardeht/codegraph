@@ -53,6 +53,7 @@ class CodegraphTests(unittest.TestCase):
             self.assertTrue((output / "obsidian" / "Indexes" / "Features.md").is_file())
             self.assertTrue((output / "obsidian" / "Indexes" / "Layers.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Architecture.md").is_file())
+            self.assertTrue((output / "obsidian" / "Dashboards" / "Entrypoints.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Features.md").is_file())
             self.assertTrue((output / "obsidian" / "Dashboards" / "Layers.md").is_file())
             self.assertTrue(
@@ -108,6 +109,35 @@ class CodegraphTests(unittest.TestCase):
                 open_code = main(["open", str(output)])
             self.assertEqual(open_code, 0)
             self.assertEqual(open_stdout.getvalue().strip(), str((output / "obsidian").resolve()))
+
+    def test_obsidian_entrypoints_dashboard_ranks_navigation_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "src" / "screens" / "Home").mkdir(parents=True)
+            (target / "src" / "components").mkdir(parents=True)
+            (target / "src" / "screens" / "Home" / "HomeScreen.tsx").write_text(
+                "import { Button } from '../../components/Button'\n"
+                "export function HomeScreen() { return <Button /> }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "components" / "Button.tsx").write_text(
+                "import { Clickable } from 'external-ui'\n"
+                "export function Button() { return <Clickable /> }\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output, export_obsidian=True))
+            entrypoints = (output / "obsidian" / "Dashboards" / "Entrypoints.md").read_text(
+                encoding="utf-8"
+            )
+            index = (output / "obsidian" / "index.md").read_text(encoding="utf-8")
+
+            self.assertIn("[[Dashboards/Entrypoints|Entrypoints Dashboard]]", index)
+            self.assertIn("## Agent Sequence", entrypoints)
+            self.assertIn("## Important Files", entrypoints)
+            self.assertIn("HomeScreen.tsx", entrypoints)
 
     def test_architecture_enrichment_links_roles_layers_and_import_relationships(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -605,20 +635,20 @@ class CodegraphTests(unittest.TestCase):
             output = root / "graph"
             (target / "src").mkdir(parents=True)
             (target / "src" / "Screen.tsx").write_text(
-                "import { Pressable, TouchableOpacity } from 'react-native'\\n"
-                "export function Screen() { return <TouchableOpacity><Pressable /></TouchableOpacity> }\\n",
+                "import { Clickable, Surface } from 'external-ui'\\n"
+                "export function Screen() { return <Surface><Clickable /></Surface> }\\n",
                 encoding="utf-8",
             )
             scan(ScanOptions(target=target, output=output))
             graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
             node_ids = {node["id"] for node in graph["nodes"]}
-            self.assertIn("imported-symbol:react-native#TouchableOpacity", node_ids)
-            self.assertIn("imported-symbol:react-native#Pressable", node_ids)
+            self.assertIn("imported-symbol:external-ui#Surface", node_ids)
+            self.assertIn("imported-symbol:external-ui#Clickable", node_ids)
             self.assertTrue(
                 any(
                     edge["kind"] == "renders"
                     and edge["from"] == "file:src/Screen.tsx"
-                    and edge["to"] == "imported-symbol:react-native#TouchableOpacity"
+                    and edge["to"] == "imported-symbol:external-ui#Surface"
                     for edge in graph["edges"]
                 )
             )
@@ -626,7 +656,7 @@ class CodegraphTests(unittest.TestCase):
                 any(
                     edge["kind"] == "renders"
                     and edge["from"] == "file:src/Screen.tsx"
-                    and edge["to"] == "imported-symbol:react-native#Pressable"
+                    and edge["to"] == "imported-symbol:external-ui#Clickable"
                     for edge in graph["edges"]
                 )
             )
@@ -662,8 +692,8 @@ class CodegraphTests(unittest.TestCase):
                 "} from 'react'\n"
                 "import type { ButtonProps } from './components/types'\n"
                 "import { Button } from './components'\n"
-                "const { TouchableOpacity, Pressable: RNPressable } = require('react-native')\n"
-                "export default function Screen() { return <><Button /><TouchableOpacity /></> }\n",
+                "const { Surface, Clickable: PrimaryClickable } = require('external-ui')\n"
+                "export default function Screen() { return <><Button /><Surface /></> }\n",
                 encoding="utf-8",
             )
 
@@ -697,8 +727,8 @@ class CodegraphTests(unittest.TestCase):
                 ),
                 edges,
             )
-            self.assertIn("imported-symbol:react-native#TouchableOpacity", node_ids)
-            self.assertIn("imported-symbol:react-native#RNPressable", node_ids)
+            self.assertIn("imported-symbol:external-ui#Surface", node_ids)
+            self.assertIn("imported-symbol:external-ui#PrimaryClickable", node_ids)
             self.assertIn("lexical-re-export", methods)
             self.assertIn("lexical-type-import", methods)
             self.assertIn("lexical-require", methods)
@@ -706,7 +736,7 @@ class CodegraphTests(unittest.TestCase):
                 any(
                     edge["kind"] == "renders"
                     and edge["from"] == "file:src/Screen.tsx"
-                    and edge["to"] == "imported-symbol:react-native#TouchableOpacity"
+                    and edge["to"] == "imported-symbol:external-ui#Surface"
                     for edge in graph["edges"]
                 )
             )

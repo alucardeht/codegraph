@@ -798,6 +798,7 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
                 "## Navigation",
                 "",
                 "- [[Dashboards/Architecture|Architecture Dashboard]]",
+                "- [[Dashboards/Entrypoints|Entrypoints Dashboard]]",
                 "- [[Dashboards/Features|Feature Dashboard]]",
                 "- [[Dashboards/Layers|Layer Dashboard]]",
                 "- [[Dashboards/Research|Research Dashboard]]",
@@ -1025,12 +1026,22 @@ def write_obsidian_dashboards(
     dashboards_dir = path / "Dashboards"
     dashboards_dir.mkdir(exist_ok=True)
     incoming_by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    outgoing_by_source: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for edge in graph_payload["edges"]:
         incoming_by_target[edge["to"]].append(edge)
+        outgoing_by_source[edge["from"]].append(edge)
     nodes_by_kind: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for node in graph_payload["nodes"]:
         nodes_by_kind[node["kind"]].append(node)
 
+    write_entrypoints_dashboard(
+        dashboards_dir / "Entrypoints.md",
+        graph_payload,
+        node_note_paths,
+        nodes_by_kind,
+        incoming_by_target,
+        outgoing_by_source,
+    )
     write_architecture_dashboard(
         dashboards_dir / "Architecture.md",
         graph_payload,
@@ -1112,6 +1123,73 @@ def write_ranked_architecture_dashboard(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_entrypoints_dashboard(
+    path: Path,
+    graph_payload: dict[str, Any],
+    node_note_paths: dict[str, str],
+    nodes_by_kind: dict[str, list[dict[str, Any]]],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
+) -> None:
+    lines = [
+        "# Entrypoints Dashboard",
+        "",
+        "## Agent Sequence",
+        "",
+        "- Run `status` before trusting the graph.",
+        "- Run `doctor` before using the graph for planning.",
+        "- Start with architecture, feature, layer, and important file entrypoints.",
+        "- Use focused source inspection after the graph narrows the area.",
+        "",
+        "## Top Features",
+        "",
+    ]
+    lines.extend(
+        render_ranked_architecture_links(
+            nodes_by_kind["feature"],
+            node_note_paths,
+            incoming_by_target,
+            limit=12,
+        )
+    )
+    lines.extend(["", "## Top Layers", ""])
+    lines.extend(
+        render_ranked_architecture_links(
+            nodes_by_kind["layer"],
+            node_note_paths,
+            incoming_by_target,
+            limit=12,
+        )
+    )
+    lines.extend(["", "## Important Files", ""])
+    lines.extend(
+        render_ranked_file_links(
+            nodes_by_kind["file"],
+            node_note_paths,
+            incoming_by_target,
+            outgoing_by_source,
+            limit=20,
+        )
+    )
+    lines.extend(["", "## External Modules", ""])
+    lines.extend(
+        render_ranked_links(
+            nodes_by_kind["module"],
+            node_note_paths,
+            incoming_by_target,
+            edge_kinds={"imports"},
+            empty_label="None",
+            limit=20,
+            suffix="importing edges",
+        )
+    )
+    if nodes_by_kind["concept"] or nodes_by_kind["claim"]:
+        lines.extend(["", "## Research", ""])
+        lines.append("- [[Dashboards/Research|Research Dashboard]]")
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def write_research_dashboard(
     path: Path,
     nodes_by_kind: dict[str, list[dict[str, Any]]],
@@ -1152,6 +1230,39 @@ def write_research_dashboard(
     )
     lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def render_ranked_file_links(
+    files: list[dict[str, Any]],
+    node_note_paths: dict[str, str],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
+    *,
+    limit: int,
+) -> list[str]:
+    ranked = sorted(
+        files,
+        key=lambda node: (
+            -semantic_edge_count(node["id"], incoming_by_target, outgoing_by_source),
+            node["id"],
+        ),
+    )[:limit]
+    if not ranked:
+        return ["- None"]
+    return [
+        f"- [[{node_note_paths[node['id']]}|{node['source_path']}]] "
+        f"({semantic_edge_count(node['id'], incoming_by_target, outgoing_by_source)} semantic edges)"
+        for node in ranked
+    ]
+
+
+def semantic_edge_count(
+    node_id: str,
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    outgoing_by_source: dict[str, list[dict[str, Any]]],
+) -> int:
+    edges = incoming_by_target[node_id] + outgoing_by_source[node_id]
+    return sum(1 for edge in edges if edge["kind"] != "contains")
 
 
 def render_ranked_links(

@@ -11,7 +11,12 @@ from typing import Any
 
 from .architecture import enrich_architecture
 from .config import ImportAlias, config_fingerprint, load_codegraph_config
-from .extractors import classify_content_domain, extract_file_content, extractor_declarations_payload
+from .extractors import (
+    ExtractionContext,
+    classify_content_domain,
+    extract_file_content,
+    extractor_declarations_payload,
+)
 from .graph import Graph
 from .ignore import IgnorePolicy
 from .models import Edge, Evidence, Node, SourceRange, utc_now
@@ -94,6 +99,7 @@ def scan(options: ScanOptions) -> dict[str, Any]:
     directory_nodes: set[str] = set()
     extraction_results: list[dict[str, object]] = []
     cache_stats = {"reused": 0, "written": 0, "missed": 0}
+    extraction_context = ExtractionContext()
     for file_path in files:
         relative = file_path.relative_to(target).as_posix()
         add_directory_containment(graph, relative, directory_nodes)
@@ -129,6 +135,7 @@ def scan(options: ScanOptions) -> dict[str, Any]:
                 target,
                 file_path,
                 import_aliases=import_aliases,
+                context=extraction_context,
             ).to_dict()
             extraction_payload = extraction_cache_payload(
                 relative,
@@ -602,6 +609,9 @@ def quality_summary(
     supported_ratio = safe_ratio(supported_file_count, len(extraction_results))
     semantic_edge_density = safe_ratio(len(relationship_edges), len(files))
     low_information_ratio = safe_ratio(len(low_information_supported_files), supported_file_count)
+    observed_kinds = observed_kinds_summary(extraction_results)
+    has_code_like_files = any(str(item["content_domain"]) in {"code", "test"} for item in extraction_results if item["supported"])
+    semantic_edge_density_threshold = 0.75 if has_code_like_files else 0.0
     gates = [
         quality_gate("edge_endpoints", len(missing_endpoints) == 0, len(missing_endpoints)),
         quality_gate("edge_evidence", len(edge_without_evidence) == 0, len(edge_without_evidence)),
@@ -609,7 +619,11 @@ def quality_summary(
         quality_gate("source_paths", len(invalid_source_paths) == 0, len(invalid_source_paths)),
         quality_gate("extractor_failures", len(extractor_failures) == 0, len(extractor_failures)),
         quality_gate("supported_ratio", supported_ratio >= 0.70, round(supported_ratio, 4)),
-        quality_gate("semantic_edge_density", semantic_edge_density >= 0.75, round(semantic_edge_density, 4)),
+        quality_gate(
+            "semantic_edge_density",
+            semantic_edge_density >= semantic_edge_density_threshold,
+            {"value": round(semantic_edge_density, 4), "threshold": semantic_edge_density_threshold},
+        ),
         quality_gate("low_information_ratio", low_information_ratio <= 0.10, round(low_information_ratio, 4)),
     ]
     critical_failed = any(
@@ -625,7 +639,9 @@ def quality_summary(
         }
     )
     if critical_failed or (
-        supported_file_count > 0 and (supported_ratio < 0.35 or semantic_edge_density < 0.10)
+        has_code_like_files
+        and supported_file_count > 0
+        and (supported_ratio < 0.35 or semantic_edge_density < 0.10)
     ):
         status = "untrusted"
     elif any(not gate["passed"] for gate in gates):
@@ -659,6 +675,7 @@ def quality_summary(
         "relationship_edges_by_kind": dict(sorted(relationship_edges_by_kind.items())),
         "nodes_by_kind": dict(sorted(nodes_by_kind.items())),
         "extractors": dict(sorted(extractors.items())),
+        "observed_kinds": observed_kinds,
         "quality_gates": gates,
     }
 
@@ -671,6 +688,43 @@ def safe_ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 1.0
     return numerator / denominator
+
+
+def observed_kinds_summary(extraction_results: list[dict[str, object]]) -> dict[str, dict[str, dict[str, object]]]:
+    by_extractor: dict[str, dict[str, object]] = {}
+    by_domain: dict[str, dict[str, object]] = {}
+    for item in extraction_results:
+        extractor = str(item["extractor"])
+        domain = str(item["content_domain"])
+        node_kinds = [str(kind) for kind in item.get("node_kinds", []) if isinstance(kind, str)]
+        edge_kinds = [str(kind) for kind in item.get("edge_kinds", []) if isinstance(kind, str)]
+        for bucket, key in ((by_extractor, extractor), (by_domain, domain)):
+            record = bucket.setdefault(
+                key,
+                {"supported_file_count": 0, "node_kinds": set(), "edge_kinds": set()},
+            )
+            if item.get("supported"):
+                record["supported_file_count"] += 1
+            record["node_kinds"].update(node_kinds)
+            record["edge_kinds"].update(edge_kinds)
+    return {
+        "by_extractor": {
+            key: {
+                "supported_file_count": value["supported_file_count"],
+                "node_kinds": sorted(value["node_kinds"]),
+                "edge_kinds": sorted(value["edge_kinds"]),
+            }
+            for key, value in sorted(by_extractor.items())
+        },
+        "by_content_domain": {
+            key: {
+                "supported_file_count": value["supported_file_count"],
+                "node_kinds": sorted(value["node_kinds"]),
+                "edge_kinds": sorted(value["edge_kinds"]),
+            }
+            for key, value in sorted(by_domain.items())
+        },
+    }
 
 
 def semantic_component_summary(graph_payload: dict[str, Any]) -> dict[str, Any]:
@@ -903,7 +957,7 @@ def obsidian_note_path(node: dict[str, Any]) -> str:
         return f"Modules/{module}__{symbol}"
     if kind == "asset_file":
         return f"Assets/{name}"
-    if kind == "artifact":
+    if kind in {"artifact", "lockfile"}:
         return f"Artifacts/{name}"
     if kind == "config_file":
         return f"Config/{name}"
@@ -998,7 +1052,7 @@ def write_obsidian_indexes(
         "Concepts": {"concept"},
         "Claims": {"claim"},
         "Assets": {"asset_file"},
-        "Artifacts": {"artifact"},
+        "Artifacts": {"artifact", "lockfile"},
         "Config": {"config_file", "config_key"},
         "Observability": {"log_file", "log_statement"},
         "Directories": {"directory"},

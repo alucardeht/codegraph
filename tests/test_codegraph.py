@@ -6,9 +6,12 @@ import io
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
+from codegraph import extractors as extractor_module
 from codegraph.cli import main
+from codegraph.extractors import ExtractionContext, classify_content_domain, resolve_import
 from codegraph.ignore import IgnorePolicy
 from codegraph.scanner import ScanOptions, scan
 from codegraph.status import graph_status
@@ -598,35 +601,98 @@ class CodegraphTests(unittest.TestCase):
                 )
             )
 
-    def test_python_ast_extractor_records_definitions_and_calls(self) -> None:
+    def test_python_ast_extractor_records_methods_calls_and_relationships(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             target = root / "target"
             output = root / "graph"
-            target.mkdir()
-            (target / "app.py").write_text(
-                "import os\n\n"
-                "def helper():\n"
-                "    return os.getcwd()\n\n"
-                "def main():\n"
-                "    return helper()\n",
+            (target / "pkg").mkdir(parents=True)
+            (target / "pkg" / "base.py").write_text(
+                "class Base:\n"
+                "    pass\n",
+                encoding="utf-8",
+            )
+            (target / "pkg" / "decorators.py").write_text(
+                "def traced(function):\n"
+                "    return function\n",
+                encoding="utf-8",
+            )
+            (target / "pkg" / "app.py").write_text(
+                "from .base import Base\n"
+                "from .decorators import traced\n\n"
+                "class Service(Base):\n"
+                "    @traced\n"
+                "    def helper(self):\n"
+                "        return 1\n\n"
+                "    def run(self):\n"
+                "        return self.helper()\n",
                 encoding="utf-8",
             )
 
             scan(ScanOptions(target=target, output=output))
             graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
             edges = {(edge["kind"], edge["from"], edge["to"]) for edge in graph["edges"]}
+            edge_records = {
+                (edge["kind"], edge["from"], edge["to"]): edge
+                for edge in graph["edges"]
+            }
+            evidence_by_id = {item["id"]: item for item in graph["evidence"]}
             evidence_extractors = {item["extractor"] for item in graph["evidence"]}
+            import_edges = [
+                edge
+                for edge in graph["edges"]
+                if edge["kind"] == "imports" and edge["from"] == "file:pkg/app.py"
+            ]
 
             self.assertIn("python.ast", evidence_extractors)
             self.assertIn(
                 (
-                    "calls",
-                    "symbol:app.py#main:6",
-                    "symbol:app.py#helper:3",
+                    "contains",
+                    "symbol:pkg/app.py#Service:4",
+                    "symbol:pkg/app.py#Service.helper:6",
                 ),
                 edges,
             )
+            self.assertIn(
+                (
+                    "calls",
+                    "symbol:pkg/app.py#Service.run:9",
+                    "symbol:pkg/app.py#Service.helper:6",
+                ),
+                edges,
+            )
+            self.assertIn(
+                (
+                    "depends_on",
+                    "symbol:pkg/app.py#Service:4",
+                    "file:pkg/base.py",
+                ),
+                edges,
+            )
+            self.assertIn(
+                (
+                    "depends_on",
+                    "symbol:pkg/app.py#Service.helper:6",
+                    "file:pkg/decorators.py",
+                ),
+                edges,
+            )
+            self.assertTrue(
+                any(
+                    edge["attributes"].get("module") == ".base"
+                    and edge["attributes"].get("relative_level") == 1
+                    for edge in import_edges
+                )
+            )
+            self.assertTrue(all(edge["confidence"] == "DERIVED" for edge in import_edges))
+            base_dep = edge_records[("depends_on", "symbol:pkg/app.py#Service:4", "file:pkg/base.py")]
+            decorator_dep = edge_records[
+                ("depends_on", "symbol:pkg/app.py#Service.helper:6", "file:pkg/decorators.py")
+            ]
+            self.assertEqual(base_dep["confidence"], "DERIVED")
+            self.assertEqual(decorator_dep["confidence"], "DERIVED")
+            self.assertEqual(evidence_by_id[base_dep["evidence_id"]]["confidence"], "DERIVED")
+            self.assertEqual(evidence_by_id[decorator_dep["evidence_id"]]["confidence"], "DERIVED")
 
     def test_tsx_external_named_imports_are_queryable_and_rendered(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -740,6 +806,98 @@ class CodegraphTests(unittest.TestCase):
                     for edge in graph["edges"]
                 )
             )
+            self.assertTrue(
+                any(
+                    edge["kind"] == "exports"
+                    and edge["from"] == "file:src/Screen.tsx"
+                    and edge["to"] == "symbol:src/Screen.tsx#Screen:8"
+                    for edge in graph["edges"]
+                )
+            )
+
+    def test_js_ts_lexical_extractor_covers_dynamic_imports_and_commonjs_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "src").mkdir(parents=True)
+            (target / "src" / "feature.ts").write_text(
+                "export default class Feature {}\n"
+                "export async function loadFeature() { return Feature }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "consumer.ts").write_text(
+                "const shared = 1\n"
+                "const lazyFeature = import('./feature')\n"
+                "const featurePath = require.resolve('./feature')\n"
+                "module.exports = require('./feature')\n"
+                "exports.shared = shared\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output))
+            graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+            edges = {(edge["kind"], edge["from"], edge["to"]) for edge in graph["edges"]}
+            methods = {item["method"] for item in graph["evidence"]}
+
+            self.assertIn(("imports", "file:src/consumer.ts", "file:src/feature.ts"), edges)
+            self.assertIn(("exports", "file:src/consumer.ts", "file:src/feature.ts"), edges)
+            self.assertIn(("exports", "file:src/consumer.ts", "symbol:src/consumer.ts#shared:1"), edges)
+            self.assertIn("lexical-commonjs-export", methods)
+            self.assertIn("lexical-dynamic-import", methods)
+            self.assertIn("lexical-require-resolve", methods)
+            self.assertIn("lexical-commonjs-export-require", methods)
+
+    def test_lockfiles_are_classified_as_generated_lockfiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            target.mkdir()
+            (target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+            (target / "poetry.lock").write_text("[[package]]\nname = \"demo\"\n", encoding="utf-8")
+
+            manifest = scan(ScanOptions(target=target, output=output))
+            graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+            lockfile_nodes = {
+                node["source_path"]: node for node in graph["nodes"] if node["kind"] == "lockfile"
+            }
+
+            self.assertEqual(classify_content_domain(Path("package-lock.json")), "generated")
+            self.assertEqual(classify_content_domain(Path("poetry.lock")), "generated")
+            self.assertEqual(manifest["quality"]["content_domain_counts"]["generated"], 2)
+            self.assertIn("package-lock.json", lockfile_nodes)
+            self.assertIn("poetry.lock", lockfile_nodes)
+            self.assertFalse(
+                any(
+                    node["kind"] == "config_file"
+                    and node.get("source_path") in {"package-lock.json", "poetry.lock"}
+                    for node in graph["nodes"]
+                )
+            )
+
+    def test_import_resolution_context_caches_repeated_relative_lookups(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            (target / "src").mkdir(parents=True)
+            feature = target / "src" / "feature.ts"
+            consumer = target / "src" / "consumer.ts"
+            feature.write_text("export const feature = 1\n", encoding="utf-8")
+            consumer.write_text("import './feature'\n", encoding="utf-8")
+
+            context = ExtractionContext()
+            with mock.patch(
+                "codegraph.extractors.resolve_candidate_base",
+                wraps=extractor_module.resolve_candidate_base,
+            ) as resolve_candidate_base_mock:
+                first = resolve_import(target, consumer, "./feature", (), context=context)
+                second = resolve_import(target, consumer, "./feature", (), context=context)
+
+            expected_feature = feature.resolve()
+            self.assertEqual(first, expected_feature)
+            self.assertEqual(second, expected_feature)
+            self.assertEqual(resolve_candidate_base_mock.call_count, 1)
 
     def test_config_and_log_files_are_classified_domains(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -820,7 +978,16 @@ class CodegraphTests(unittest.TestCase):
             graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
 
             self.assertEqual(manifest["quality"]["unsupported_file_count"], 0)
+            self.assertEqual(manifest["quality"]["status"], "passed")
             self.assertEqual(manifest["quality"]["content_domain_counts"]["asset"], 1)
+            self.assertEqual(
+                manifest["quality"]["observed_kinds"]["by_extractor"]["asset.metadata"]["node_kinds"],
+                ["asset_file"],
+            )
+            self.assertEqual(
+                manifest["quality"]["observed_kinds"]["by_content_domain"]["asset"]["edge_kinds"],
+                ["stores_asset"],
+            )
             self.assertTrue(any(node["kind"] == "asset_file" for node in graph["nodes"]))
             self.assertTrue(any(edge["kind"] == "stores_asset" for edge in graph["edges"]))
             self.assertTrue((output / "obsidian" / "Indexes" / "Assets.md").is_file())
@@ -885,7 +1052,7 @@ class CodegraphTests(unittest.TestCase):
                 any(node.get("source_path") == "src/domains/Billing/screens/InvoiceScreen.tsx" for node in query["nodes"])
             )
 
-    def test_markdown_extracts_inferred_concepts_and_claims(self) -> None:
+    def test_markdown_extracts_claim_concepts_and_simple_citations(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             target = root / "target"
@@ -893,7 +1060,9 @@ class CodegraphTests(unittest.TestCase):
             target.mkdir()
             (target / "notes.md").write_text(
                 "# Notes\n\n"
-                "The `stable graph` concept supports #research-synthesis work.\n"
+                "The `stable graph` concept supports [source evidence][src] and #research-synthesis work.[^1]\n"
+                "[src]: https://example.com/source\n"
+                "[^1]: Footnote support\n"
                 "The method depends on `source evidence` for trust.\n",
                 encoding="utf-8",
             )
@@ -901,6 +1070,7 @@ class CodegraphTests(unittest.TestCase):
             scan(ScanOptions(target=target, output=output))
             graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
             node_kinds = {node["kind"] for node in graph["nodes"]}
+            node_ids = {node["id"] for node in graph["nodes"]}
             edge_kinds = {edge["kind"] for edge in graph["edges"]}
             inferred_evidence = [
                 item
@@ -910,9 +1080,14 @@ class CodegraphTests(unittest.TestCase):
 
             self.assertIn("concept", node_kinds)
             self.assertIn("claim", node_kinds)
+            self.assertIn("reference", node_kinds)
             self.assertIn("mentions", edge_kinds)
             self.assertIn("supports", edge_kinds)
             self.assertIn("depends_on", edge_kinds)
+            self.assertIn("cites", edge_kinds)
+            self.assertNotIn("concept:concept", node_ids)
+            self.assertIn("concept:stable-graph", node_ids)
+            self.assertIn("reference:https://example.com/source", node_ids)
             self.assertTrue(inferred_evidence)
 
 

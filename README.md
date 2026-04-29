@@ -246,10 +246,14 @@ The evidence layer stores direct extracted facts:
 
 - files and directories
 - symbols and sections
-- imports, exports, renders, definitions, references
-- JS/TS module forms including type imports, re-exports, and `require`
+- imports, exports, renders, definitions, references, and simple citations
+- Python AST structure including class methods, relative import levels, safe
+  local method call resolution, and evidenced decorator/base-class links
+- JS/TS module forms including type imports, re-exports, `require`, dynamic
+  `import()`, `require.resolve()`, and CommonJS export signals
 - internal package imports derived from `package.json` names
-- Markdown concepts and claim signals as inferred research/documentation edges
+- Markdown concepts and claim signals as inferred research/documentation edges,
+  with concept-hub suppression and simple reference/footnote capture
 - config files and keys
 - logs and log statements
 - assets and generated artifacts as metadata-backed nodes
@@ -271,6 +275,9 @@ while parser and lexical facts remain the stronger evidence for final changes.
 
 The manifest includes extractor declarations so agents can see which node kinds
 and edge kinds each extractor is expected to produce.
+Quality summaries also record observed node and edge kinds by extractor and
+content domain for auditability across code, docs, config, log, asset, and
+artifact-heavy collections.
 
 ## Obsidian Export
 

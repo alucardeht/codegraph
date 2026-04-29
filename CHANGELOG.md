@@ -10,6 +10,8 @@
 - Internal package import resolution from discovered `package.json` names.
 - Incremental refresh cache for safe changed-file rebuilds.
 - Extractor capability declarations in the manifest.
+- Markdown concept and claim extraction with inferred confidence.
+- Obsidian research dashboard and indexes for concepts and claims.
 - Obsidian dashboards for architecture, features, and layers.
 - Operator commands for export rebuilds, Obsidian export path discovery, and
   confirmed output cleanup.

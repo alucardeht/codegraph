@@ -46,6 +46,25 @@ CODE_EXTENSIONS = {
 
 MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+MARKDOWN_HASHTAG_RE = re.compile(r"(?<!\w)#([A-Za-z][A-Za-z0-9_-]{2,})")
+MARKDOWN_KEY_TERM_RE = re.compile(r"`([^`\n]{3,80})`|\*\*([^*\n]{3,80})\*\*")
+MARKDOWN_CLAIM_RE = re.compile(
+    r"\b(supports?|contradicts?|depends on|requires|enables|prevents|derived from)\b",
+    re.IGNORECASE,
+)
+STOP_CONCEPTS = {
+    "and",
+    "are",
+    "but",
+    "can",
+    "for",
+    "from",
+    "into",
+    "the",
+    "this",
+    "that",
+    "with",
+}
 CONFIG_KEY_RE = re.compile(r"^\s*[\"']?([A-Za-z_][\w.-]*)[\"']?\s*[:=]")
 LOG_LEVEL_RE = re.compile(r"\b(DEBUG|INFO|WARN|WARNING|ERROR|FATAL|TRACE)\b", re.IGNORECASE)
 PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import\s+(.+)|import\s+(.+))")
@@ -132,8 +151,8 @@ EXTRACTOR_DECLARATIONS = (
     ExtractorDeclaration(
         "markdown",
         ("documentation",),
-        ("reference", "section"),
-        ("contains", "references"),
+        ("claim", "concept", "reference", "section"),
+        ("contains", "mentions", "references", "supports", "contradicts", "depends_on", "derived_from"),
     ),
     ExtractorDeclaration(
         "config.lexical",
@@ -301,6 +320,7 @@ def extractor_id(path: Path) -> str:
 def extract_markdown(graph: Graph, file_path: Path, relative: str) -> None:
     file_node = f"file:{relative}"
     lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    current_section_node = file_node
 
     for line_number, line in enumerate(lines, start=1):
         heading = MARKDOWN_HEADING_RE.match(line)
@@ -330,6 +350,7 @@ def extract_markdown(graph: Graph, file_path: Path, relative: str) -> None:
                 confidence="PROVEN",
                 evidence_id=evidence_id,
             )
+            current_section_node = node_id
 
         for match in MARKDOWN_LINK_RE.finditer(line):
             label = match.group(1).strip()
@@ -348,6 +369,57 @@ def extract_markdown(graph: Graph, file_path: Path, relative: str) -> None:
                 source=file_node,
                 target=target_id,
                 confidence="PROVEN",
+                evidence_id=evidence_id,
+            )
+
+        for concept in markdown_concepts_from_line(line):
+            concept_id = f"concept:{slug(concept)}"
+            graph.add_node(concept_id, "concept", concept)
+            evidence_id = graph.add_evidence(
+                extractor="markdown",
+                method="concept-mention",
+                source_locator=f"{relative}:{line_number}",
+                snippet=line,
+                confidence="INFERRED",
+            )
+            graph.add_edge(
+                kind="mentions",
+                source=current_section_node,
+                target=concept_id,
+                confidence="INFERRED",
+                evidence_id=evidence_id,
+            )
+
+        claim = markdown_claim_from_line(line)
+        if claim:
+            claim_node = f"claim:{relative}#{line_number}:{slug(claim['verb'])}"
+            graph.add_node(
+                claim_node,
+                "claim",
+                claim["label"],
+                source_path=relative,
+                range=SourceRange(line_number),
+                attributes={"verb": claim["verb"]},
+            )
+            evidence_id = graph.add_evidence(
+                extractor="markdown",
+                method="claim-signal",
+                source_locator=f"{relative}:{line_number}",
+                snippet=line,
+                confidence="INFERRED",
+            )
+            graph.add_edge(
+                kind="contains",
+                source=current_section_node,
+                target=claim_node,
+                confidence="INFERRED",
+                evidence_id=evidence_id,
+            )
+            graph.add_edge(
+                kind=claim["edge_kind"],
+                source=claim_node,
+                target=current_section_node,
+                confidence="INFERRED",
                 evidence_id=evidence_id,
             )
 
@@ -408,6 +480,54 @@ def extract_config(graph: Graph, file_path: Path, relative: str) -> None:
             confidence="PROVEN",
             evidence_id=key_evidence,
         )
+
+
+def markdown_concepts_from_line(line: str) -> list[str]:
+    if MARKDOWN_HEADING_RE.match(line):
+        return []
+    concepts: list[str] = []
+    for match in MARKDOWN_HASHTAG_RE.finditer(line):
+        concepts.append(match.group(1).replace("-", " ").replace("_", " ").strip())
+    for match in MARKDOWN_KEY_TERM_RE.finditer(line):
+        value = match.group(1) or match.group(2)
+        concepts.append(value.strip())
+    return dedupe_preserve_order(
+        normalized
+        for concept in concepts
+        if (normalized := normalize_markdown_concept(concept))
+    )
+
+
+def normalize_markdown_concept(value: str) -> str:
+    clean = re.sub(r"\s+", " ", value.strip(" .,:;()[]{}")).strip()
+    if not clean:
+        return ""
+    if len(clean) < 3 or len(clean) > 80:
+        return ""
+    if clean.lower() in STOP_CONCEPTS:
+        return ""
+    return clean
+
+
+def markdown_claim_from_line(line: str) -> dict[str, str] | None:
+    clean = line.strip()
+    if not clean or clean.startswith("#") or len(clean.split()) < 4:
+        return None
+    match = MARKDOWN_CLAIM_RE.search(clean)
+    if not match:
+        return None
+    verb = match.group(1).lower()
+    edge_kind = {
+        "support": "supports",
+        "supports": "supports",
+        "contradict": "contradicts",
+        "contradicts": "contradicts",
+        "depends on": "depends_on",
+        "require": "depends_on",
+        "requires": "depends_on",
+        "derived from": "derived_from",
+    }.get(verb, "supports")
+    return {"verb": verb, "edge_kind": edge_kind, "label": clean[:120]}
 
 
 def extract_log(graph: Graph, file_path: Path, relative: str) -> None:

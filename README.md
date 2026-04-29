@@ -249,6 +249,7 @@ The evidence layer stores direct extracted facts:
 - imports, exports, renders, definitions, references
 - JS/TS module forms including type imports, re-exports, and `require`
 - internal package imports derived from `package.json` names
+- Markdown concepts and claim signals as inferred research/documentation edges
 - config files and keys
 - logs and log statements
 - assets and generated artifacts as metadata-backed nodes
@@ -282,12 +283,15 @@ Important sections:
 - `Dashboards/Architecture.md`: ranked architecture summary.
 - `Dashboards/Features.md`: ranked feature summary.
 - `Dashboards/Layers.md`: ranked layer summary.
+- `Dashboards/Research.md`: concepts and claims from documentation/research.
 - `Indexes/Architecture.md`: high-level architecture nodes.
 - `Indexes/Features.md`: product/topic groupings.
 - `Indexes/Layers.md`: structural layers.
 - `Indexes/Roles.md`: file roles.
 - `Indexes/Domains.md`: material domains.
 - `Indexes/Files.md`: source files.
+- `Indexes/Concepts.md`: inferred documentation/research concepts.
+- `Indexes/Claims.md`: inferred documentation/research claim signals.
 - `Indexes/Assets.md`: asset metadata nodes.
 - `Indexes/Artifacts.md`: generated or artifact metadata nodes.
 - `Indexes/Config.md`: configuration files and keys.

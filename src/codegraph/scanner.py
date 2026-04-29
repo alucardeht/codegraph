@@ -800,6 +800,7 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
                 "- [[Dashboards/Architecture|Architecture Dashboard]]",
                 "- [[Dashboards/Features|Feature Dashboard]]",
                 "- [[Dashboards/Layers|Layer Dashboard]]",
+                "- [[Dashboards/Research|Research Dashboard]]",
                 "- [[Indexes/Architecture|Architecture]]",
                 "- [[Indexes/Features|Features]]",
                 "- [[Indexes/Layers|Layers]]",
@@ -808,6 +809,8 @@ def write_obsidian_export(path: Path, graph_payload: dict[str, Any], manifest: d
                 "- [[Indexes/Files|Files]]",
                 "- [[Indexes/Symbols|Symbols]]",
                 "- [[Indexes/Modules|Modules]]",
+                "- [[Indexes/Concepts|Concepts]]",
+                "- [[Indexes/Claims|Claims]]",
                 "- [[Indexes/Assets|Assets]]",
                 "- [[Indexes/Artifacts|Artifacts]]",
                 "- [[Indexes/Config|Config]]",
@@ -918,6 +921,11 @@ def obsidian_note_path(node: dict[str, Any]) -> str:
         return f"Docs/{name}__{section_name}{note_line_suffix(node)}"
     if kind == "reference":
         return f"Docs/{name}"
+    if kind == "concept":
+        return f"Concepts/{name}"
+    if kind == "claim":
+        claim_name = safe_note_name(node["label"] or node["id"])
+        return f"Claims/{name}__{claim_name}{note_line_suffix(node)}"
     return f"Other/{safe_note_name(kind)}/{name}"
 
 
@@ -986,6 +994,8 @@ def write_obsidian_indexes(
         "Files": {"file"},
         "Symbols": {"function", "class"},
         "Modules": {"module"},
+        "Concepts": {"concept"},
+        "Claims": {"claim"},
         "Assets": {"asset_file"},
         "Artifacts": {"artifact"},
         "Config": {"config_file", "config_key"},
@@ -1039,6 +1049,12 @@ def write_obsidian_dashboards(
         dashboards_dir / "Layers.md",
         "Layers",
         nodes_by_kind["layer"],
+        node_note_paths,
+        incoming_by_target,
+    )
+    write_research_dashboard(
+        dashboards_dir / "Research.md",
+        nodes_by_kind,
         node_note_paths,
         incoming_by_target,
     )
@@ -1096,6 +1112,73 @@ def write_ranked_architecture_dashboard(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_research_dashboard(
+    path: Path,
+    nodes_by_kind: dict[str, list[dict[str, Any]]],
+    node_note_paths: dict[str, str],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+) -> None:
+    lines = [
+        "# Research Dashboard",
+        "",
+        f"- Concepts: {len(nodes_by_kind['concept'])}",
+        f"- Claims: {len(nodes_by_kind['claim'])}",
+        "",
+        "## Top Concepts",
+        "",
+    ]
+    lines.extend(
+        render_ranked_links(
+            nodes_by_kind["concept"],
+            node_note_paths,
+            incoming_by_target,
+            edge_kinds={"mentions"},
+            empty_label="None",
+            limit=20,
+            suffix="mentions",
+        )
+    )
+    lines.extend(["", "## Top Claims", ""])
+    lines.extend(
+        render_ranked_links(
+            nodes_by_kind["claim"],
+            node_note_paths,
+            incoming_by_target,
+            edge_kinds={"contains"},
+            empty_label="None",
+            limit=20,
+            suffix="source links",
+        )
+    )
+    lines.append("")
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def render_ranked_links(
+    nodes: list[dict[str, Any]],
+    node_note_paths: dict[str, str],
+    incoming_by_target: dict[str, list[dict[str, Any]]],
+    *,
+    edge_kinds: set[str],
+    empty_label: str,
+    limit: int | None,
+    suffix: str,
+) -> list[str]:
+    ranked = sorted(
+        nodes,
+        key=lambda node: (-edge_kind_count(incoming_by_target[node["id"]], edge_kinds), node["id"]),
+    )
+    if limit is not None:
+        ranked = ranked[:limit]
+    if not ranked:
+        return [f"- {empty_label}"]
+    return [
+        f"- [[{node_note_paths[node['id']]}|{node['label']}]] "
+        f"({edge_kind_count(incoming_by_target[node['id']], edge_kinds)} {suffix})"
+        for node in ranked
+    ]
+
+
 def render_ranked_architecture_links(
     nodes: list[dict[str, Any]],
     node_note_paths: dict[str, str],
@@ -1120,6 +1203,10 @@ def render_ranked_architecture_links(
 
 def architecture_link_count(edges: list[dict[str, Any]]) -> int:
     return sum(1 for edge in edges if edge["kind"] in {"belongs_to", "categorized_as"})
+
+
+def edge_kind_count(edges: list[dict[str, Any]], kinds: set[str]) -> int:
+    return sum(1 for edge in edges if edge["kind"] in kinds)
 
 
 def write_obsidian_index(

@@ -755,6 +755,30 @@ class CodegraphTests(unittest.TestCase):
                 (output / "obsidian" / "Observability" / "runtime.log__ERROR_L2.md").is_file()
             )
 
+    def test_obsidian_export_exposes_research_navigation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            target.mkdir()
+            (target / "notes.md").write_text(
+                "# Notes\n\n"
+                "The `stable graph` concept supports #research-synthesis work.\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output, export_obsidian=True))
+            index = (output / "obsidian" / "index.md").read_text(encoding="utf-8")
+            research = (output / "obsidian" / "Dashboards" / "Research.md").read_text(
+                encoding="utf-8"
+            )
+
+            self.assertIn("[[Dashboards/Research|Research Dashboard]]", index)
+            self.assertTrue((output / "obsidian" / "Indexes" / "Concepts.md").is_file())
+            self.assertTrue((output / "obsidian" / "Indexes" / "Claims.md").is_file())
+            self.assertIn("stable graph", research)
+            self.assertIn("research synthesis", research)
+
     def test_assets_are_supported_as_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -830,6 +854,36 @@ class CodegraphTests(unittest.TestCase):
             self.assertTrue(
                 any(node.get("source_path") == "src/domains/Billing/screens/InvoiceScreen.tsx" for node in query["nodes"])
             )
+
+    def test_markdown_extracts_inferred_concepts_and_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            target.mkdir()
+            (target / "notes.md").write_text(
+                "# Notes\n\n"
+                "The `stable graph` concept supports #research-synthesis work.\n"
+                "The method depends on `source evidence` for trust.\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output))
+            graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+            node_kinds = {node["kind"] for node in graph["nodes"]}
+            edge_kinds = {edge["kind"] for edge in graph["edges"]}
+            inferred_evidence = [
+                item
+                for item in graph["evidence"]
+                if item["extractor"] == "markdown" and item["confidence"] == "INFERRED"
+            ]
+
+            self.assertIn("concept", node_kinds)
+            self.assertIn("claim", node_kinds)
+            self.assertIn("mentions", edge_kinds)
+            self.assertIn("supports", edge_kinds)
+            self.assertIn("depends_on", edge_kinds)
+            self.assertTrue(inferred_evidence)
 
 
 if __name__ == "__main__":

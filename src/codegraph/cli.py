@@ -65,7 +65,8 @@ def main(argv: list[str] | None = None) -> int:
                         options.get("allow_output_inside_target", False)
                     ),
                     export_obsidian=bool(options.get("export_obsidian", False)),
-                    replace_output=True,
+                    incremental=True,
+                    allow_existing_output=True,
                     config=Path(options["config"]) if options.get("config") else None,
                 )
             )
@@ -297,7 +298,8 @@ def watch(output: Path, *, interval: float) -> None:
                             options.get("allow_output_inside_target", False)
                         ),
                         export_obsidian=bool(options.get("export_obsidian", False)),
-                        replace_output=True,
+                        incremental=True,
+                        allow_existing_output=True,
                         config=Path(options["config"]) if options.get("config") else None,
                     )
                 )

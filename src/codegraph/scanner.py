@@ -11,10 +11,10 @@ from typing import Any
 
 from .architecture import enrich_architecture
 from .config import ImportAlias, config_fingerprint, load_codegraph_config
-from .extractors import classify_content_domain, extract_file_content
+from .extractors import classify_content_domain, extract_file_content, extractor_declarations_payload
 from .graph import Graph
 from .ignore import IgnorePolicy
-from .models import utc_now
+from .models import Edge, Evidence, Node, SourceRange, utc_now
 
 
 GRAPH_FILE = "graph.json"
@@ -22,6 +22,8 @@ MANIFEST_FILE = "manifest.json"
 REPORT_FILE = "report.md"
 OBSIDIAN_DIR = "obsidian"
 READY_FILE = ".ready"
+EXTRACTION_CACHE_DIR = "cache/extractions"
+EXTRACTION_CACHE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -35,16 +37,23 @@ class ScanOptions:
     export_obsidian: bool = False
     replace_output: bool = False
     config: Path | None = None
+    incremental: bool = False
+    allow_existing_output: bool = False
 
 
 def scan(options: ScanOptions) -> dict[str, Any]:
     target = options.target.resolve()
     output = options.output.resolve()
     validate_scan_paths(target, output, options.allow_output_inside_target)
-    prepare_output_directory(output, replace_output=options.replace_output)
+    prepare_output_directory(
+        output,
+        replace_output=options.replace_output,
+        allow_existing_output=options.allow_existing_output or options.incremental,
+    )
     mark_not_ready(output)
 
     started_at = utc_now()
+    previous_manifest = load_existing_manifest(output) if options.incremental else None
     config = load_codegraph_config(target, options.config)
     include = tuple(config.include) + options.include
     disable_default_ignore = tuple(config.disable_default_ignore) + options.disable_default_ignore
@@ -68,12 +77,23 @@ def scan(options: ScanOptions) -> dict[str, Any]:
 
     skipped: list[dict[str, str]] = []
     files = discover_files(target, policy, skipped)
-    fingerprints = fingerprint_files(target, files)
+    fingerprints = fingerprint_files_incremental(
+        target,
+        files,
+        previous_manifest.get("source_fingerprints", {}) if previous_manifest else {},
+    )
     internal_package_aliases = discover_internal_package_aliases(target, files)
     import_aliases = config.import_aliases + internal_package_aliases
+    refresh_plan = incremental_refresh_plan(
+        previous_manifest,
+        config_fingerprint(config),
+        import_aliases,
+        fingerprints,
+    )
 
     directory_nodes: set[str] = set()
     extraction_results: list[dict[str, object]] = []
+    cache_stats = {"reused": 0, "written": 0, "missed": 0}
     for file_path in files:
         relative = file_path.relative_to(target).as_posix()
         add_directory_containment(graph, relative, directory_nodes)
@@ -92,14 +112,37 @@ def scan(options: ScanOptions) -> dict[str, Any]:
         )
         parent = parent_node_id(relative)
         graph.add_edge(kind="contains", source=parent, target=file_node, confidence="PROVEN")
-        extraction_results.append(
-            extract_file_content(
-                graph,
+        extraction_payload = None
+        if refresh_plan["mode"] == "incremental":
+            extraction_payload = read_extraction_cache(
+                output,
+                relative,
+                fingerprints[relative],
+                import_aliases,
+            )
+        if extraction_payload is None:
+            if refresh_plan["mode"] == "incremental":
+                cache_stats["missed"] += 1
+            file_graph = Graph()
+            extraction_result = extract_file_content(
+                file_graph,
                 target,
                 file_path,
                 import_aliases=import_aliases,
             ).to_dict()
-        )
+            extraction_payload = extraction_cache_payload(
+                relative,
+                fingerprints[relative],
+                import_aliases,
+                file_graph,
+                extraction_result,
+            )
+            write_extraction_cache(output, relative, extraction_payload)
+            cache_stats["written"] += 1
+        else:
+            cache_stats["reused"] += 1
+        merge_graph_payload(graph, extraction_payload["graph"])
+        extraction_results.append(dict(extraction_payload["extraction_result"]))
 
     enrich_architecture(
         graph,
@@ -123,17 +166,29 @@ def scan(options: ScanOptions) -> dict[str, Any]:
         "output": str(output),
         "freshness": "current",
         "scan_options": {
-            "include": list(include),
-            "disable_default_ignore": list(disable_default_ignore),
-            "no_default_ignores": no_default_ignores,
+            "include": list(options.include),
+            "disable_default_ignore": list(options.disable_default_ignore),
+            "no_default_ignores": options.no_default_ignores,
             "allow_output_inside_target": options.allow_output_inside_target,
             "export_obsidian": options.export_obsidian,
             "replace_output": options.replace_output,
             "config": str(config.path) if config.path else None,
+            "incremental": options.incremental,
+        },
+        "effective_scan_options": {
+            "include": list(include),
+            "disable_default_ignore": list(disable_default_ignore),
+            "no_default_ignores": no_default_ignores,
         },
         "config": config.to_dict(),
         "internal_package_aliases": [item.to_dict() for item in internal_package_aliases],
+        "effective_import_aliases": import_aliases_payload(import_aliases),
         "config_fingerprint": config_fingerprint(config),
+        "extractor_declarations": extractor_declarations_payload(),
+        "refresh": {
+            **refresh_plan,
+            "cache": cache_stats,
+        },
         "ignore_policy": policy.to_dict(),
         "source_fingerprints": fingerprints,
         "extraction_results": extraction_results,
@@ -150,7 +205,12 @@ def scan(options: ScanOptions) -> dict[str, Any]:
     return manifest
 
 
-def prepare_output_directory(output: Path, *, replace_output: bool = False) -> None:
+def prepare_output_directory(
+    output: Path,
+    *,
+    replace_output: bool = False,
+    allow_existing_output: bool = False,
+) -> None:
     if not output.exists():
         output.mkdir(parents=True)
         return
@@ -162,10 +222,16 @@ def prepare_output_directory(output: Path, *, replace_output: bool = False) -> N
         return
     if not any(output.iterdir()):
         return
+    if allow_existing_output and is_managed_output(output):
+        return
     raise ValueError(
         "Output path is not empty. Choose an empty directory or pass "
         "--replace-output to delete and recreate the entire output directory."
     )
+
+
+def is_managed_output(output: Path) -> bool:
+    return (output / MANIFEST_FILE).is_file() and (output / GRAPH_FILE).is_file()
 
 
 def validate_scan_paths(target: Path, output: Path, allow_inside: bool) -> None:
@@ -231,6 +297,178 @@ def fingerprint_files(target: Path, files: list[Path]) -> dict[str, dict[str, An
             "sha256": sha256_file(file_path),
         }
     return fingerprints
+
+
+def fingerprint_files_incremental(
+    target: Path,
+    files: list[Path],
+    previous: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    fingerprints: dict[str, dict[str, Any]] = {}
+    for file_path in files:
+        relative = file_path.relative_to(target).as_posix()
+        stat = file_path.stat()
+        prior = previous.get(relative, {})
+        if prior.get("size") == stat.st_size and prior.get("mtime_ns") == stat.st_mtime_ns:
+            fingerprints[relative] = dict(prior)
+            continue
+        fingerprints[relative] = {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": sha256_file(file_path),
+        }
+    return fingerprints
+
+
+def load_existing_manifest(output: Path) -> dict[str, Any] | None:
+    manifest_path = output / MANIFEST_FILE
+    if not manifest_path.is_file():
+        return None
+    return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+
+def incremental_refresh_plan(
+    previous_manifest: dict[str, Any] | None,
+    current_config_fingerprint: dict[str, int] | None,
+    import_aliases: tuple[ImportAlias, ...],
+    current_fingerprints: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if previous_manifest is None:
+        return {"mode": "full", "reason": "no_previous_manifest"}
+    previous_fingerprints = previous_manifest.get("source_fingerprints", {})
+    added = sorted(set(current_fingerprints) - set(previous_fingerprints))
+    deleted = sorted(set(previous_fingerprints) - set(current_fingerprints))
+    changed = sorted(
+        path
+        for path in set(current_fingerprints) & set(previous_fingerprints)
+        if current_fingerprints[path].get("sha256") != previous_fingerprints[path].get("sha256")
+    )
+    if added:
+        return {"mode": "full", "reason": "added_files", "added": added, "deleted": deleted, "changed": changed}
+    if deleted:
+        return {"mode": "full", "reason": "deleted_files", "added": added, "deleted": deleted, "changed": changed}
+    if previous_manifest.get("config_fingerprint") != current_config_fingerprint:
+        return {"mode": "full", "reason": "config_changed", "added": added, "deleted": deleted, "changed": changed}
+    if previous_manifest.get("effective_import_aliases") != import_aliases_payload(import_aliases):
+        return {
+            "mode": "full",
+            "reason": "import_aliases_changed",
+            "added": added,
+            "deleted": deleted,
+            "changed": changed,
+        }
+    return {"mode": "incremental", "reason": "compatible_cache", "added": added, "deleted": deleted, "changed": changed}
+
+
+def import_aliases_payload(import_aliases: tuple[ImportAlias, ...]) -> list[dict[str, str]]:
+    return [item.to_dict() for item in import_aliases]
+
+
+def extraction_cache_payload(
+    relative: str,
+    fingerprint: dict[str, Any],
+    import_aliases: tuple[ImportAlias, ...],
+    graph: Graph,
+    extraction_result: dict[str, object],
+) -> dict[str, Any]:
+    return {
+        "schema_version": EXTRACTION_CACHE_SCHEMA_VERSION,
+        "source_path": relative,
+        "fingerprint": dict(fingerprint),
+        "import_aliases": import_aliases_payload(import_aliases),
+        "graph": graph.to_dict(),
+        "extraction_result": extraction_result,
+    }
+
+
+def read_extraction_cache(
+    output: Path,
+    relative: str,
+    fingerprint: dict[str, Any],
+    import_aliases: tuple[ImportAlias, ...],
+) -> dict[str, Any] | None:
+    cache_path = extraction_cache_path(output, relative)
+    if not cache_path.is_file():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if payload.get("schema_version") != EXTRACTION_CACHE_SCHEMA_VERSION:
+        return None
+    if payload.get("source_path") != relative:
+        return None
+    if payload.get("fingerprint", {}).get("sha256") != fingerprint.get("sha256"):
+        return None
+    if payload.get("import_aliases") != import_aliases_payload(import_aliases):
+        return None
+    if not isinstance(payload.get("graph"), dict) or not isinstance(payload.get("extraction_result"), dict):
+        return None
+    return payload
+
+
+def write_extraction_cache(output: Path, relative: str, payload: dict[str, Any]) -> None:
+    cache_path = extraction_cache_path(output, relative)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(cache_path, payload)
+
+
+def extraction_cache_path(output: Path, relative: str) -> Path:
+    digest = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+    return output / EXTRACTION_CACHE_DIR / f"{digest}.json"
+
+
+def merge_graph_payload(graph: Graph, payload: dict[str, Any]) -> None:
+    for item in payload.get("nodes", []):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        graph.nodes[item["id"]] = Node(
+            id=item["id"],
+            kind=str(item.get("kind", "unknown")),
+            label=str(item.get("label", item["id"])),
+            source_path=item.get("source_path") if isinstance(item.get("source_path"), str) else None,
+            range=source_range_from_payload(item.get("range")),
+            attributes=item.get("attributes") if isinstance(item.get("attributes"), dict) else {},
+        )
+    for item in payload.get("evidence", []):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        graph.evidence[item["id"]] = Evidence(
+            id=item["id"],
+            extractor=str(item.get("extractor", "unknown")),
+            method=str(item.get("method", "unknown")),
+            source_locator=str(item.get("source_locator", "")),
+            snippet=str(item.get("snippet", "")),
+            confidence=str(item.get("confidence", "UNRESOLVED")),
+            captured_at=str(item.get("captured_at", utc_now())),
+        )
+    for item in payload.get("edges", []):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            continue
+        source = item.get("from")
+        target = item.get("to")
+        if not isinstance(source, str) or not isinstance(target, str):
+            continue
+        graph.edges[item["id"]] = Edge(
+            id=item["id"],
+            kind=str(item.get("kind", "references")),
+            source=source,
+            target=target,
+            confidence=str(item.get("confidence", "UNRESOLVED")),
+            evidence_id=item.get("evidence_id") if isinstance(item.get("evidence_id"), str) else None,
+            attributes=item.get("attributes") if isinstance(item.get("attributes"), dict) else {},
+        )
+
+
+def source_range_from_payload(payload: Any) -> SourceRange | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("start_line"), int):
+        return None
+    return SourceRange(
+        start_line=payload["start_line"],
+        start_column=int(payload.get("start_column") or 1),
+        end_line=payload.get("end_line") if isinstance(payload.get("end_line"), int) else None,
+        end_column=payload.get("end_column") if isinstance(payload.get("end_column"), int) else None,
+    )
 
 
 def discover_internal_package_aliases(target: Path, files: list[Path]) -> tuple[ImportAlias, ...]:

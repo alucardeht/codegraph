@@ -102,6 +102,22 @@ class ExtractionResult:
 
 
 @dataclass(frozen=True)
+class ExtractorDeclaration:
+    extractor: str
+    content_domains: tuple[str, ...]
+    node_kinds: tuple[str, ...]
+    edge_kinds: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "extractor": self.extractor,
+            "content_domains": list(self.content_domains),
+            "node_kinds": list(self.node_kinds),
+            "edge_kinds": list(self.edge_kinds),
+        }
+
+
+@dataclass(frozen=True)
 class JsModuleStatement:
     line_number: int
     snippet: str
@@ -110,6 +126,56 @@ class JsModuleStatement:
     edge_kind: str
     bind_names: bool
     method: str
+
+
+EXTRACTOR_DECLARATIONS = (
+    ExtractorDeclaration(
+        "markdown",
+        ("documentation",),
+        ("reference", "section"),
+        ("contains", "references"),
+    ),
+    ExtractorDeclaration(
+        "config.lexical",
+        ("configuration",),
+        ("config_file", "config_key"),
+        ("configures", "defines"),
+    ),
+    ExtractorDeclaration(
+        "log.lexical",
+        ("observability",),
+        ("log_file", "log_statement"),
+        ("diagnoses", "emits_log"),
+    ),
+    ExtractorDeclaration(
+        "asset.metadata",
+        ("asset",),
+        ("asset_file",),
+        ("stores_asset",),
+    ),
+    ExtractorDeclaration(
+        "artifact.metadata",
+        ("generated",),
+        ("artifact",),
+        ("generated_from",),
+    ),
+    ExtractorDeclaration(
+        "python.ast",
+        ("code", "test"),
+        ("class", "function", "module", "imported_symbol"),
+        ("calls", "contains", "defines", "exports", "imports"),
+    ),
+    ExtractorDeclaration(
+        "code.lexical",
+        ("code", "test"),
+        ("class", "function", "module", "imported_symbol"),
+        ("contains", "defines", "exports", "imports", "renders"),
+    ),
+)
+
+
+def extractor_declarations_payload() -> list[dict[str, object]]:
+    return [item.to_dict() for item in EXTRACTOR_DECLARATIONS]
 
 
 def extract_file_content(
@@ -227,6 +293,8 @@ def extractor_id(path: Path) -> str:
         return "asset.metadata"
     if domain == "generated":
         return "artifact.metadata"
+    if suffix == ".py":
+        return "python.ast"
     return "code.lexical"
 
 

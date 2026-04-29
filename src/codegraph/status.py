@@ -34,7 +34,7 @@ def graph_status(output: Path) -> dict[str, Any]:
             "output": str(output),
         }
 
-    options = manifest.get("scan_options", {})
+    options = manifest.get("effective_scan_options") or manifest.get("scan_options", {})
     policy = IgnorePolicy(
         target=target,
         include=options.get("include", []),

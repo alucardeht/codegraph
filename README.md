@@ -99,8 +99,13 @@ Rebuild an existing graph using the stored manifest contract.
 codegraph refresh /path/to/output
 ```
 
-Refresh intentionally replaces the existing graph output because that output is
-managed by `codegraph`.
+Refresh keeps the managed output directory and reuses cached per-file extraction
+results when it is safe to do so. It falls back to a full rebuild when target
+membership, config, ignore policy, or import alias resolution changes.
+
+The graph is marked not ready while refresh is rebuilding, then marked ready
+only after `graph.json`, `manifest.json`, reports, and optional exports are
+written.
 
 ### Watch
 
@@ -262,6 +267,9 @@ The architecture layer adds inferred orientation:
 
 Architecture edges are `INFERRED`. They are meant for discovery and orientation,
 while parser and lexical facts remain the stronger evidence for final changes.
+
+The manifest includes extractor declarations so agents can see which node kinds
+and edge kinds each extractor is expected to produce.
 
 ## Obsidian Export
 

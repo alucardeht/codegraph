@@ -71,6 +71,14 @@ class CodegraphTests(unittest.TestCase):
             self.assertEqual(manifest["quality"]["invalid_source_path_count"], 0)
             self.assertIn("quality_gates", manifest["quality"])
             self.assertIn("documentation", manifest["quality"]["content_domain_counts"])
+            self.assertTrue(
+                any(
+                    item["extractor"] == "python.ast"
+                    and "function" in item["node_kinds"]
+                    and "calls" in item["edge_kinds"]
+                    for item in manifest["extractor_declarations"]
+                )
+            )
             non_contains_edges = [
                 edge for edge in graph["edges"] if edge["kind"] != "contains"
             ]
@@ -254,6 +262,71 @@ class CodegraphTests(unittest.TestCase):
             status = graph_status(output)
             self.assertEqual(status["freshness"], "stale")
             self.assertEqual(status["changed"], ["README.md"])
+
+    def test_refresh_reuses_unchanged_extraction_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "src").mkdir(parents=True)
+            (target / "src" / "helper.ts").write_text(
+                "export function helper() { return 1 }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "feature.ts").write_text(
+                "import { helper } from './helper'\n"
+                "export function feature() { return helper() }\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output))
+            time.sleep(0.01)
+            (target / "src" / "helper.ts").write_text(
+                "export function helper() { return 2 }\n",
+                encoding="utf-8",
+            )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                refresh_code = main(["refresh", str(output)])
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(refresh_code, 0)
+            self.assertEqual(manifest["refresh"]["mode"], "incremental")
+            self.assertEqual(manifest["refresh"]["changed"], ["src/helper.ts"])
+            self.assertGreaterEqual(manifest["refresh"]["cache"]["reused"], 1)
+            self.assertEqual(graph_status(output)["freshness"], "current")
+
+    def test_refresh_rebuilds_safely_when_files_are_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "src").mkdir(parents=True)
+            helper = target / "src" / "helper.ts"
+            helper.write_text(
+                "export function helper() { return 1 }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "feature.ts").write_text(
+                "import { helper } from './helper'\n"
+                "export function feature() { return helper() }\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output))
+            helper.unlink()
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                refresh_code = main(["refresh", str(output)])
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+            node_ids = {node["id"] for node in graph["nodes"]}
+
+            self.assertEqual(refresh_code, 0)
+            self.assertEqual(manifest["refresh"]["mode"], "full")
+            self.assertEqual(manifest["refresh"]["reason"], "deleted_files")
+            self.assertNotIn("file:src/helper.ts", node_ids)
+            self.assertEqual(graph_status(output)["freshness"], "current")
 
     def test_default_ignore_can_be_overridden_for_child_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

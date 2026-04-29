@@ -341,6 +341,65 @@ class CodegraphTests(unittest.TestCase):
             self.assertEqual(status["freshness"], "stale")
             self.assertTrue(status["config_changed"])
 
+    def test_package_json_names_resolve_internal_workspace_imports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "apps" / "web" / "src").mkdir(parents=True)
+            (target / "packages" / "ui" / "src").mkdir(parents=True)
+            (target / "packages" / "ui" / "package.json").write_text(
+                '{"name": "@repo/ui", "source": "src/index.ts"}\n',
+                encoding="utf-8",
+            )
+            (target / "packages" / "ui" / "src" / "index.ts").write_text(
+                "export { Card } from './Card'\n",
+                encoding="utf-8",
+            )
+            (target / "packages" / "ui" / "src" / "Card.tsx").write_text(
+                "export function Card() { return null }\n",
+                encoding="utf-8",
+            )
+            (target / "apps" / "web" / "src" / "Home.tsx").write_text(
+                "import { Card } from '@repo/ui'\n"
+                "export function Home() { return <Card /> }\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output))
+            graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            edges = {(edge["kind"], edge["from"], edge["to"]) for edge in graph["edges"]}
+
+            self.assertIn(
+                {"pattern": "@repo/ui", "target": "packages/ui/src/index.ts"},
+                manifest["internal_package_aliases"],
+            )
+            self.assertIn(
+                (
+                    "imports",
+                    "file:apps/web/src/Home.tsx",
+                    "file:packages/ui/src/index.ts",
+                ),
+                edges,
+            )
+            self.assertIn(
+                (
+                    "exports",
+                    "file:packages/ui/src/index.ts",
+                    "file:packages/ui/src/Card.tsx",
+                ),
+                edges,
+            )
+            self.assertIn(
+                (
+                    "renders",
+                    "file:apps/web/src/Home.tsx",
+                    "file:packages/ui/src/index.ts",
+                ),
+                edges,
+            )
+
     def test_cli_scan_requires_out_argument(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "target"
@@ -495,6 +554,86 @@ class CodegraphTests(unittest.TestCase):
                     edge["kind"] == "renders"
                     and edge["from"] == "file:src/Screen.tsx"
                     and edge["to"] == "imported-symbol:react-native#Pressable"
+                    for edge in graph["edges"]
+                )
+            )
+
+    def test_js_ts_module_forms_create_navigation_edges(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            output = root / "graph"
+            (target / "src" / "components").mkdir(parents=True)
+            (target / "src" / "components" / "Button.tsx").write_text(
+                "export function Button() { return null }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "components" / "types.ts").write_text(
+                "export type ButtonProps = { label: string }\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "components" / "tokens.ts").write_text(
+                "export const primary = 'blue'\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "components" / "index.ts").write_text(
+                "export { Button } from './Button'\n"
+                "export type { ButtonProps } from './types'\n"
+                "export * from './tokens'\n",
+                encoding="utf-8",
+            )
+            (target / "src" / "Screen.tsx").write_text(
+                "import React, {\n"
+                "  type ReactNode,\n"
+                "  useMemo as useReactMemo,\n"
+                "} from 'react'\n"
+                "import type { ButtonProps } from './components/types'\n"
+                "import { Button } from './components'\n"
+                "const { TouchableOpacity, Pressable: RNPressable } = require('react-native')\n"
+                "export default function Screen() { return <><Button /><TouchableOpacity /></> }\n",
+                encoding="utf-8",
+            )
+
+            scan(ScanOptions(target=target, output=output))
+            graph = json.loads((output / "graph.json").read_text(encoding="utf-8"))
+            edges = {(edge["kind"], edge["from"], edge["to"]) for edge in graph["edges"]}
+            node_ids = {node["id"] for node in graph["nodes"]}
+            methods = {item["method"] for item in graph["evidence"]}
+
+            self.assertIn(
+                (
+                    "exports",
+                    "file:src/components/index.ts",
+                    "file:src/components/Button.tsx",
+                ),
+                edges,
+            )
+            self.assertIn(
+                (
+                    "exports",
+                    "file:src/components/index.ts",
+                    "file:src/components/types.ts",
+                ),
+                edges,
+            )
+            self.assertIn(
+                (
+                    "imports",
+                    "file:src/Screen.tsx",
+                    "file:src/components/index.ts",
+                ),
+                edges,
+            )
+            self.assertIn("imported-symbol:react-native#TouchableOpacity", node_ids)
+            self.assertIn("imported-symbol:react-native#RNPressable", node_ids)
+            self.assertIn("lexical-re-export", methods)
+            self.assertIn("lexical-type-import", methods)
+            self.assertIn("lexical-require", methods)
+            self.assertTrue(
+                any(
+                    edge["kind"] == "renders"
+                    and edge["from"] == "file:src/Screen.tsx"
+                    and edge["to"] == "imported-symbol:react-native#TouchableOpacity"
                     for edge in graph["edges"]
                 )
             )

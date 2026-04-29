@@ -228,6 +228,11 @@ Supported sections:
 The manifest records the config path, effective config, and config fingerprint.
 Changing the config makes `status` report the graph as stale.
 
+Scans also derive internal package aliases from discovered `package.json` files.
+For example, a package named `@repo/ui` can make imports from `@repo/ui`
+resolve to that package's source entrypoint instead of appearing as an external
+module.
+
 ## Architecture Model
 
 The graph has two complementary layers.
@@ -237,6 +242,8 @@ The evidence layer stores direct extracted facts:
 - files and directories
 - symbols and sections
 - imports, exports, renders, definitions, references
+- JS/TS module forms including type imports, re-exports, and `require`
+- internal package imports derived from `package.json` names
 - config files and keys
 - logs and log statements
 - assets and generated artifacts as metadata-backed nodes

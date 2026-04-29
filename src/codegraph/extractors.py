@@ -25,14 +25,10 @@ CONFIG_FILENAMES = {
 }
 LOG_EXTENSIONS = {".log"}
 ASSET_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".pdf"}
+JS_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 CODE_EXTENSIONS = {
     ".py",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".mjs",
-    ".cjs",
+    *JS_EXTENSIONS,
     ".go",
     ".rs",
     ".java",
@@ -54,14 +50,27 @@ CONFIG_KEY_RE = re.compile(r"^\s*[\"']?([A-Za-z_][\w.-]*)[\"']?\s*[:=]")
 LOG_LEVEL_RE = re.compile(r"\b(DEBUG|INFO|WARN|WARNING|ERROR|FATAL|TRACE)\b", re.IGNORECASE)
 PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import\s+(.+)|import\s+(.+))")
 JS_IMPORT_RE = re.compile(
-    r"^\s*(?:import\s+(?:.+?\s+from\s+)?[\"']([^\"']+)[\"']|export\s+.+?\s+from\s+[\"']([^\"']+)[\"']|const\s+.+?=\s+require\([\"']([^\"']+)[\"']\))"
+    r"^\s*(?:import\s+(?:type\s+)?(?:.+?\s+from\s+)?[\"']([^\"']+)[\"']|export\s+(?:type\s+)?.+?\s+from\s+[\"']([^\"']+)[\"']|(?:const|let|var)\s+.+?=\s+require\([\"']([^\"']+)[\"']\))"
 )
-JS_IMPORT_DETAIL_RE = re.compile(r"^\s*import\s+(.+?)\s+from\s+[\"']([^\"']+)[\"']")
+JS_IMPORT_DETAIL_RE = re.compile(r"^\s*import\s+(?:type\s+)?(.+?)\s+from\s+[\"']([^\"']+)[\"']")
+JS_IMPORT_FROM_RE = re.compile(
+    r"^\s*import\s+(?P<type>type\s+)?(?P<specifier>.+?)\s+from\s+[\"'](?P<module>[^\"']+)[\"']",
+    re.DOTALL,
+)
+JS_SIDE_EFFECT_IMPORT_RE = re.compile(r"^\s*import\s+[\"'](?P<module>[^\"']+)[\"']")
+JS_EXPORT_FROM_RE = re.compile(
+    r"^\s*export\s+(?P<type>type\s+)?(?P<specifier>.+?)\s+from\s+[\"'](?P<module>[^\"']+)[\"']",
+    re.DOTALL,
+)
+JS_REQUIRE_RE = re.compile(
+    r"^\s*(?:const|let|var)\s+(?P<specifier>.+?)\s*=\s*require\([\"'](?P<module>[^\"']+)[\"']\)",
+    re.DOTALL,
+)
 JS_JSX_COMPONENT_RE = re.compile(r"<\s*([A-Z][A-Za-z0-9_$]*)\b")
 PY_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(")
 PY_CLASS_RE = re.compile(r"^\s*class\s+([A-Za-z_][\w]*)\b")
 JS_FUNC_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\("
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(|^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b|\(?[A-Za-z_$,\s]*\)?\s*=>|\()"
 )
 JS_CLASS_RE = re.compile(r"^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b")
 
@@ -90,6 +99,17 @@ class ExtractionResult:
             "relationship_edge_count": self.relationship_edge_count,
             "error": self.error,
         }
+
+
+@dataclass(frozen=True)
+class JsModuleStatement:
+    line_number: int
+    snippet: str
+    module: str
+    names: list[str]
+    edge_kind: str
+    bind_names: bool
+    method: str
 
 
 def extract_file_content(
@@ -566,39 +586,43 @@ def extract_code_lexical(
     lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
     imported_bindings: dict[str, str] = {}
 
-    for line_number, snippet, module, names in multiline_js_imports(lines, file_path.suffix.lower()):
-        target_id = add_import_relationship(
-            graph,
-            target,
-            file_path,
-            file_node,
-            relative,
-            line_number,
-            snippet,
-            module,
-            names,
-            imported_bindings,
-            import_aliases,
-        )
-        if target_id:
-            continue
-
-    for line_number, line in enumerate(lines, start=1):
-        for module in modules_from_line(line, file_path.suffix.lower()):
+    if file_path.suffix.lower() in JS_EXTENSIONS:
+        for statement in js_module_statements(lines, file_path.suffix.lower()):
             add_import_relationship(
                 graph,
                 target,
                 file_path,
                 file_node,
                 relative,
-                line_number,
-                line,
-                module,
-                imported_names_from_line(line, module, file_path.suffix.lower()),
+                statement.line_number,
+                statement.snippet,
+                statement.module,
+                statement.names,
                 imported_bindings,
                 import_aliases,
+                method=statement.method,
+                edge_kind=statement.edge_kind,
+                bind_names=statement.bind_names,
             )
 
+    if file_path.suffix.lower() not in JS_EXTENSIONS:
+        for line_number, line in enumerate(lines, start=1):
+            for module in modules_from_line(line, file_path.suffix.lower()):
+                add_import_relationship(
+                    graph,
+                    target,
+                    file_path,
+                    file_node,
+                    relative,
+                    line_number,
+                    line,
+                    module,
+                    imported_names_from_line(line, module, file_path.suffix.lower()),
+                    imported_bindings,
+                    import_aliases,
+                )
+
+    for line_number, line in enumerate(lines, start=1):
         definition = definition_from_line(line, file_path.suffix.lower())
         if definition:
             kind, name = definition
@@ -675,6 +699,8 @@ def add_import_relationship(
     extractor: str = "code.lexical",
     method: str | None = None,
     confidence: str | None = None,
+    edge_kind: str = "imports",
+    bind_names: bool = True,
 ) -> str:
     resolved = resolve_import(target, file_path, module, import_aliases)
     if resolved:
@@ -682,8 +708,9 @@ def add_import_relationship(
         target_id = f"file:{target_relative}"
         edge_confidence = confidence or "DERIVED"
         edge_method = method or "lexical-import+relative-resolution"
-        for binding in names:
-            imported_bindings[binding] = target_id
+        if bind_names:
+            for binding in names:
+                imported_bindings[binding] = target_id
     else:
         target_id = f"module:{module}"
         graph.add_node(target_id, "module", module)
@@ -697,14 +724,14 @@ def add_import_relationship(
         confidence=edge_confidence,
     )
     graph.add_edge(
-        kind="imports",
+        kind=edge_kind,
         source=file_node,
         target=target_id,
         confidence=edge_confidence,
         evidence_id=evidence_id,
         attributes={"module": module},
     )
-    if resolved is None:
+    if names and resolved is None:
         for binding in names:
             binding_id = imported_binding_node_id(module, binding)
             graph.add_node(
@@ -722,14 +749,15 @@ def add_import_relationship(
                 attributes={"module": module, "symbol": binding},
             )
             graph.add_edge(
-                kind="imports",
+                kind=edge_kind,
                 source=file_node,
                 target=binding_id,
                 confidence=edge_confidence,
                 evidence_id=evidence_id,
                 attributes={"module": module, "symbol": binding},
             )
-            imported_bindings[binding] = binding_id
+            if bind_names:
+                imported_bindings[binding] = binding_id
     return target_id
 
 
@@ -756,7 +784,7 @@ def modules_from_line(line: str, suffix: str) -> list[str]:
             return [match.group(1)]
         return [part.strip().split(" as ")[0] for part in match.group(3).split(",") if part.strip()]
 
-    if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+    if suffix in JS_EXTENSIONS:
         match = JS_IMPORT_RE.match(line)
         if not match:
             return []
@@ -772,7 +800,7 @@ def definition_from_line(line: str, suffix: str) -> tuple[str, str] | None:
         if match := PY_CLASS_RE.match(line):
             return ("class", match.group(1))
 
-    if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+    if suffix in JS_EXTENSIONS:
         if match := JS_FUNC_RE.match(line):
             return ("function", match.group(1) or match.group(2))
         if match := JS_CLASS_RE.match(line):
@@ -781,60 +809,188 @@ def definition_from_line(line: str, suffix: str) -> tuple[str, str] | None:
     return None
 
 
-def multiline_js_imports(lines: list[str], suffix: str) -> list[tuple[int, str, str, list[str]]]:
-    if suffix not in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+def js_module_statements(lines: list[str], suffix: str) -> list[JsModuleStatement]:
+    if suffix not in JS_EXTENSIONS:
         return []
-    imports: list[tuple[int, str, str, list[str]]] = []
+    statements: list[JsModuleStatement] = []
     index = 0
     while index < len(lines):
         line = lines[index]
-        if not re.match(r"^\s*import\s+{\s*$", line):
+        stripped = line.strip()
+        if not stripped.startswith(("import", "export", "const ", "let ", "var ")):
             index += 1
             continue
+
         start_index = index
         block = [line]
-        index += 1
-        while index < len(lines):
-            block.append(lines[index])
-            if re.search(r"}\s+from\s+['\"][^'\"]+['\"]", lines[index]):
-                break
+        if stripped.startswith(("import", "export")) and " from " in line and quote_count_is_open(line):
             index += 1
+            while index < len(lines):
+                block.append(lines[index])
+                if re.search(r"\bfrom\s+['\"][^'\"]+['\"]", "\n".join(block)):
+                    break
+                index += 1
+        elif stripped.startswith(("import", "export")) and "{" in line and " from " not in line:
+            index += 1
+            while index < len(lines):
+                block.append(lines[index])
+                if re.search(r"\bfrom\s+['\"][^'\"]+['\"]", "\n".join(block)):
+                    break
+                index += 1
+
         snippet = "\n".join(block)
-        match = re.search(r"}\s+from\s+['\"]([^'\"]+)['\"]", snippet)
-        if match:
-            body = "\n".join(block)[block[0].find("{") + 1 : snippet.rfind("}")]
-            names = []
-            for item in body.split(","):
-                item = item.strip()
-                if not item:
-                    continue
-                names.append(item.split(" as ")[-1].strip())
-            imports.append((start_index + 1, snippet, match.group(1), names))
+        normalized = " ".join(part.strip() for part in block)
+        if match := JS_IMPORT_FROM_RE.match(normalized):
+            type_only = bool(match.group("type"))
+            statements.append(
+                JsModuleStatement(
+                    start_index + 1,
+                    snippet,
+                    match.group("module"),
+                    js_names_from_specifier(match.group("specifier")),
+                    "imports",
+                    not type_only,
+                    "lexical-type-import" if type_only else "lexical-import",
+                )
+            )
+        elif match := JS_SIDE_EFFECT_IMPORT_RE.match(normalized):
+            statements.append(
+                JsModuleStatement(
+                    start_index + 1,
+                    snippet,
+                    match.group("module"),
+                    [],
+                    "imports",
+                    False,
+                    "lexical-side-effect-import",
+                )
+            )
+        elif match := JS_EXPORT_FROM_RE.match(normalized):
+            type_only = bool(match.group("type"))
+            statements.append(
+                JsModuleStatement(
+                    start_index + 1,
+                    snippet,
+                    match.group("module"),
+                    js_names_from_specifier(match.group("specifier")),
+                    "exports",
+                    False,
+                    "lexical-type-re-export" if type_only else "lexical-re-export",
+                )
+            )
+        elif match := JS_REQUIRE_RE.match(normalized):
+            statements.append(
+                JsModuleStatement(
+                    start_index + 1,
+                    snippet,
+                    match.group("module"),
+                    js_names_from_require(match.group("specifier")),
+                    "imports",
+                    True,
+                    "lexical-require",
+                )
+            )
         index += 1
-    return imports
+    return statements
+
+
+def quote_count_is_open(line: str) -> bool:
+    return line.count("{") > line.count("}")
+
+
+def js_names_from_specifier(specifier: str) -> list[str]:
+    specifier = specifier.strip().rstrip(";")
+    if specifier == "*":
+        return []
+    if specifier.startswith("* as "):
+        return [specifier.removeprefix("* as ").strip()]
+    names: list[str] = []
+    named_block = text_between_braces(specifier)
+    default_part = specifier
+    if named_block is not None:
+        default_part = specifier[: specifier.index("{")].strip().rstrip(",")
+    if default_part and not default_part.startswith("{") and not default_part.startswith("*"):
+        first_default = split_top_level_commas(default_part)[0].strip()
+        if first_default:
+            names.append(first_default)
+    if named_block is not None:
+        names.extend(js_names_from_named_block(named_block, alias_separator=" as "))
+    return dedupe_preserve_order(name for name in names if name)
+
+
+def js_names_from_require(specifier: str) -> list[str]:
+    specifier = specifier.strip().rstrip(";")
+    named_block = text_between_braces(specifier)
+    if named_block is not None:
+        return js_names_from_named_block(named_block, alias_separator=":")
+    if match := re.match(r"^[A-Za-z_$][\w$]*$", specifier):
+        return [match.group(0)]
+    return []
+
+
+def js_names_from_named_block(block: str, *, alias_separator: str) -> list[str]:
+    names: list[str] = []
+    for item in split_top_level_commas(block):
+        item = item.strip()
+        if not item:
+            continue
+        if alias_separator in item:
+            names.append(item.split(alias_separator, 1)[1].strip())
+        else:
+            names.append(item)
+    return dedupe_preserve_order(clean_js_binding_name(name) for name in names if clean_js_binding_name(name))
+
+
+def text_between_braces(value: str) -> str | None:
+    if "{" not in value or "}" not in value:
+        return None
+    return value[value.index("{") + 1 : value.rindex("}")]
+
+
+def split_top_level_commas(value: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in value:
+        if char in "({[":
+            depth += 1
+        elif char in ")}]" and depth:
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
+def clean_js_binding_name(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r"^(?:type|typeof)\s+", "", value)
+    value = value.split("=", 1)[0].strip()
+    match = re.match(r"^[A-Za-z_$][\w$]*$", value)
+    return match.group(0) if match else ""
+
+
+def dedupe_preserve_order(values: object) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def imported_names_from_line(line: str, module: str, suffix: str) -> list[str]:
-    if suffix not in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+    if suffix not in JS_EXTENSIONS:
         return []
     match = JS_IMPORT_DETAIL_RE.match(line)
     if not match or match.group(2) != module:
         return []
-    specifier = match.group(1).strip()
-    names: list[str] = []
-    default_part = specifier.split(",", 1)[0].strip()
-    if default_part and not default_part.startswith("{") and not default_part.startswith("*"):
-        names.append(default_part)
-    if specifier.startswith("* as "):
-        names.append(specifier.removeprefix("* as ").strip())
-    if "{" in specifier and "}" in specifier:
-        named = specifier[specifier.index("{") + 1 : specifier.index("}")]
-        for item in named.split(","):
-            item = item.strip()
-            if not item:
-                continue
-            names.append(item.split(" as ")[-1].strip())
-    return [name for name in names if name]
+    return js_names_from_specifier(match.group(1))
 
 
 def jsx_components_from_line(line: str, suffix: str) -> list[str]:

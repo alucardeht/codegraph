@@ -6,6 +6,8 @@
   architecture feature markers.
 - Import alias resolution for wildcard and prefix mappings.
 - Python AST extraction for parser-backed imports, definitions, and local calls.
+- Stronger JS/TS module extraction for type imports, re-exports, and `require`.
+- Internal package import resolution from discovered `package.json` names.
 - Obsidian dashboards for architecture, features, and layers.
 - Operator commands for export rebuilds, Obsidian export path discovery, and
   confirmed output cleanup.

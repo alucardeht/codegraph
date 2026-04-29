@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .architecture import enrich_architecture
-from .config import config_fingerprint, load_codegraph_config
+from .config import ImportAlias, config_fingerprint, load_codegraph_config
 from .extractors import classify_content_domain, extract_file_content
 from .graph import Graph
 from .ignore import IgnorePolicy
@@ -69,6 +69,8 @@ def scan(options: ScanOptions) -> dict[str, Any]:
     skipped: list[dict[str, str]] = []
     files = discover_files(target, policy, skipped)
     fingerprints = fingerprint_files(target, files)
+    internal_package_aliases = discover_internal_package_aliases(target, files)
+    import_aliases = config.import_aliases + internal_package_aliases
 
     directory_nodes: set[str] = set()
     extraction_results: list[dict[str, object]] = []
@@ -95,7 +97,7 @@ def scan(options: ScanOptions) -> dict[str, Any]:
                 graph,
                 target,
                 file_path,
-                import_aliases=config.import_aliases,
+                import_aliases=import_aliases,
             ).to_dict()
         )
 
@@ -130,6 +132,7 @@ def scan(options: ScanOptions) -> dict[str, Any]:
             "config": str(config.path) if config.path else None,
         },
         "config": config.to_dict(),
+        "internal_package_aliases": [item.to_dict() for item in internal_package_aliases],
         "config_fingerprint": config_fingerprint(config),
         "ignore_policy": policy.to_dict(),
         "source_fingerprints": fingerprints,
@@ -228,6 +231,55 @@ def fingerprint_files(target: Path, files: list[Path]) -> dict[str, dict[str, An
             "sha256": sha256_file(file_path),
         }
     return fingerprints
+
+
+def discover_internal_package_aliases(target: Path, files: list[Path]) -> tuple[ImportAlias, ...]:
+    aliases: list[ImportAlias] = []
+    seen: set[tuple[str, str]] = set()
+    for file_path in files:
+        if file_path.name != "package.json":
+            continue
+        try:
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        package_dir = file_path.parent
+        exact_target = package_entry_target(target, package_dir, payload)
+        wildcard_base = package_wildcard_base(target, package_dir)
+        for alias in (
+            ImportAlias(name.strip(), exact_target),
+            ImportAlias(f"{name.strip()}/*", f"{wildcard_base}/*"),
+        ):
+            key = (alias.pattern, alias.target)
+            if key in seen:
+                continue
+            seen.add(key)
+            aliases.append(alias)
+    return tuple(aliases)
+
+
+def package_entry_target(target: Path, package_dir: Path, payload: dict[str, Any]) -> str:
+    for key in ("source", "module", "main", "types"):
+        value = payload.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        candidate = package_dir / value
+        if candidate.exists() or candidate.with_suffix(".ts").exists() or candidate.with_suffix(".tsx").exists():
+            return candidate.relative_to(target).as_posix()
+    src_dir = package_dir / "src"
+    if src_dir.is_dir():
+        return src_dir.relative_to(target).as_posix()
+    return package_dir.relative_to(target).as_posix()
+
+
+def package_wildcard_base(target: Path, package_dir: Path) -> str:
+    src_dir = package_dir / "src"
+    if src_dir.is_dir():
+        return src_dir.relative_to(target).as_posix()
+    return package_dir.relative_to(target).as_posix()
 
 
 def sha256_file(path: Path) -> str:
